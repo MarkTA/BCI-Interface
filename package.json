@@ -1,0 +1,31 @@
+{
+  "name": "bci-experiment-console",
+  "version": "0.2.0",
+  "private": true,
+  "description": "BCI capstone experiment controller",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build:frontend": "npm --prefix frontend run build",
+    "package:win": "electron-builder --win nsis",
+    "package:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "edu.asu.bci.experimentconsole",
+    "productName": "BCI Experiment Console",
+    "directories": { "output": "release" },
+    "files": ["electron/**/*", "package.json"],
+    "extraResources": [
+      { "from": "backend-dist/bci-backend", "to": "backend/bci-backend", "filter": ["**/*"] }
+    ],
+    "win": { "target": ["nsis"], "artifactName": "BCI-Experiment-Console-${version}-Setup.${ext}" },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
+    }
+  }
+}

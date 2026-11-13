@@ -1,0 +1,70 @@
+.test-guide__instructions > :first-child {
+  margin-top: 0;
+}
+.test-guide__instructions > :last-child {
+  margin-bottom: 0;
+}
+
+/* The diagram should use the full available guide width, not its intrinsic image width. */
+.test-guide > .annotated-image {
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  align-self: stretch;
+  flex: 0 0 auto;
+}
+
+.test-guide__title {
+  font-size: 28px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.test-guide__description {
+  text-align: center;
+}
+
+/* Keep numbered instructions readable even in a center-aligned parent panel. */
+.test-guide__instructions {
+  align-self: stretch;
+  text-align: left;
+}
+
+/* The guide fills its parent, including the annotated diagram. */
+.test-guide {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.test-guide__options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+}
+
+.test-guide__option {
+  padding: 8px 16px;
+  border: 1px solid var(--color-border, #94a3b8);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-surface, transparent);
+  color: var(--color-text, inherit);
+  font: inherit;
+  cursor: pointer;
+}
+
+.test-guide__option:hover {
+  background: var(--color-surface-hover, rgba(148, 163, 184, 0.12));
+}
+
+.test-guide__option--active {
+  border-color: var(--color-primary, #38bdf8);
+  background: var(--surface-173e5f, #38bdf8);
+  color: var(--color-on-primary, #08121e);
+}
+
+.test-guide__option:focus-visible {
+  outline: 2px solid var(--color-primary, #38bdf8);
+  outline-offset: 2px;
+}

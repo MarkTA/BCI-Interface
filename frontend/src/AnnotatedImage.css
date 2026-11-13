@@ -1,0 +1,86 @@
+.annotated-image {
+  --annotation-arrow-width: 4px;
+  --annotation-outline-width: 2px;
+  --annotation-outline-color: #080f18;
+  position: relative;
+  width: 100%;
+  max-width: 800px;
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-surface, #151f30);
+}
+
+.annotated-image__background,
+.annotated-image__overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.annotated-image__background {
+  display: block;
+  object-fit: fill;
+}
+
+.annotated-image__overlay {
+  pointer-events: none;
+}
+
+.annotated-image__label-container {
+  overflow: visible;
+}
+
+.annotated-image__label-wrap {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.annotated-image__label {
+  display: inline-block;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(8, 15, 26, 0.84);
+  font-family: var(--font-family, Inter, sans-serif);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* The outline adds the configured thickness on EACH side of the colored line. */
+.annotated-image__arrow-outline {
+  stroke: var(--annotation-outline-color);
+  stroke-width: calc(
+    var(--annotation-arrow-width) + 2 * var(--annotation-outline-width)
+  );
+  stroke-linecap: round;
+}
+
+.annotated-image__arrow-line {
+  stroke-width: var(--annotation-arrow-width);
+  stroke-linecap: round;
+}
+
+.annotated-image__arrow-stripe {
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+
+/* The arrowhead is outlined as a separate silhouette, then filled in pass 2. */
+.annotated-image__arrowhead-outline {
+  fill: var(--annotation-outline-color);
+  stroke: var(--annotation-outline-color);
+  stroke-width: calc(2 * var(--annotation-outline-width));
+  stroke-linejoin: round;
+}
+
+.annotated-image__arrowhead-fill {
+  stroke: none;
+}

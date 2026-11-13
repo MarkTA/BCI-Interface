@@ -1,0 +1,15 @@
+# Add these assignments to your DE10-Lite project QSF with top entity bci_uart_top.
+# Verify physical pins against the DE10-Lite user manual and your existing header usage.
+set_location_assignment PIN_P11 -to MAX10_CLK1_50
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to MAX10_CLK1_50
+set_location_assignment PIN_B8 -to KEY[0]
+set_instance_assignment -name IO_STANDARD "3.3 V SCHMITT TRIGGER" -to KEY[0]
+# JP1 physical pin 31 (GPIO[26]) -> adapter TX -> FPGA UART_RX
+set_location_assignment PIN_AA7 -to UART_RX
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to UART_RX
+# JP1 physical pin 32 (GPIO[27]) -> adapter RX <- FPGA UART_TX
+set_location_assignment PIN_Y6 -to UART_TX
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to UART_TX
+# LEDR0, should toggle for each received byte
+set_location_assignment PIN_A8 -to LEDR[0]
+set_instance_assignment -name IO_STANDARD "3.3-V LVTTL" -to LEDR[0]
