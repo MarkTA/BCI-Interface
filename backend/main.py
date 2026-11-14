@@ -51,9 +51,25 @@ async def bridge(ws: WebSocket):
                         raise ValueError('Wait for threshold updates to finish')
                     if active and mock:
                         raise ValueError('Physical run lock requires a real serial connection')
-                    serial_manager.run_active = active
-                    await ws.send_json({'type': 'run_state', 'data': 'running' if active else 'stopped',
-                                        'message': 'Threshold configuration locked' if active else 'Threshold configuration unlocked'})
+                    if active:
+                        serial_manager.reset_diagnostics()
+                        serial_manager.run_active = True
+                        await ws.send_json({'type': 'run_state', 'data': 'running',
+                                            'message': 'Threshold configuration locked'})
+                    else:
+                        # Gate incoming GPIO/event messages immediately, then stop AD3.
+                        serial_manager.run_active = False
+                        stop_error = None
+                        try:
+                            await asyncio.to_thread(ad3_manager.stop)
+                        except (RuntimeError, OSError, ValueError) as exc:
+                            stop_error = str(exc)
+                        await ws.send_json({'type': 'gpio_stats', **serial_manager.diagnostic_counts()})
+                        await ws.send_json({'type': 'run_state', 'data': 'stopped',
+                                            'message': 'Run stopped; AD3 stopped' if not stop_error else
+                                                       'Run stopped; AD3 shutdown failed: ' + stop_error})
+                        if stop_error:
+                            await ws.send_json({'type': 'error', 'message': 'AD3 shutdown failed: ' + stop_error})
                 elif message.get('type') == 'set_thresholds':
                     voltages = message.get('thresholds')
                     if not isinstance(voltages, list) or len(voltages) != 8 or any(type(v) not in (int, float) for v in voltages):
@@ -113,47 +129,58 @@ class CaptureRequest(BaseModel):
     channels: int = Field(default=1, ge=1, le=2)
     awg_peak_v: float = Field(default=1, ge=.01, le=2)
 
+from ad3_manager import ad3_manager
+
 @app.get('/api/ad3/connection')
 def ad3_connection():
-    from waveforms import AD3
-
-    device = None
     try:
-        try:
-            device = AD3()
-        except (RuntimeError, OSError, ValueError) as exc:
-            return {
-                'connected': False,
-                'ready': False,
-                'status': 'unavailable',
-                'message': str(exc),
-                'warning': 'Unable to open AD3. Check USB and close WaveForms desktop.',
-            }
+        result = ad3_manager.run_temporary(lambda device: device.check_readiness())
+        return {'connected': True, 'ready': True, 'status': 'ready',
+                'message': result['message'], 'warning': None}
+    except (RuntimeError, OSError, ValueError) as exc:
+        return {'connected': False, 'ready': False, 'status': 'unavailable',
+                'message': str(exc), 'warning': str(exc)}
 
-        try:
-            result = device.check_readiness()
-            return {
-                'connected': True,
-                'ready': True,
-                'status': 'ready',
-                'message': result['message'],
-                'warning': None,
-            }
-        except (RuntimeError, OSError, ValueError) as exc:
-            return {
-                'connected': True,
-                'ready': False,
-                'status': 'warning',
-                'message': str(exc),
-                'warning': (
-                    'AD3 opened, but scope acquisition failed. Check USB power, '
-                    'cable, and port; also close WaveForms desktop.'
-                ),
-            }
-    finally:
-        if device is not None:
-            device.close()
+class DigitalStateRequest(BaseModel):
+    mask: int = Field(ge=0, le=255)
 
+class DigitalPulseRequest(BaseModel):
+    channel: int = Field(default=4, ge=0, le=7)
+    frequency_hz: float = Field(default=5, gt=0, le=10000, allow_inf_nan=False)
+    width_us: float = Field(default=100, gt=0, le=1000000, allow_inf_nan=False)
+    duration_s: float = Field(default=5, gt=0, le=60, allow_inf_nan=False)
+
+@app.get('/api/ad3/digital/status')
+def ad3_digital_status():
+    return ad3_manager.status()
+
+@app.post('/api/ad3/digital/state')
+def ad3_digital_state(req: DigitalStateRequest):
+    try:
+        return ad3_manager.start('states', mask=req.mask)
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+@app.post('/api/ad3/digital/pulse')
+def ad3_digital_pulse(req: DigitalPulseRequest):
+    try:
+        return ad3_manager.start('pulse', **req.model_dump())
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+@app.post('/api/ad3/digital/scope')
+def ad3_digital_scope():
+    try:
+        return ad3_manager.capture_pulse_scope()
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+@app.post('/api/ad3/digital/stop')
+def ad3_digital_stop():
+    try:
+        return ad3_manager.stop()
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 @app.post('/api/capture')
 def capture(req: CaptureRequest):
@@ -170,14 +197,13 @@ def capture(req: CaptureRequest):
                 'ch1':[round(req.awg_peak_v*(v/peak)*.30 + .003*math.sin(10*i),6) for i,v in enumerate(signal)],
                 **({'ch2':[round(1.6+req.awg_peak_v*(v/peak)*.12,6) for v in signal]} if req.channels==2 else {})},
                 'mode':'mock','note':'SIMULATED scope only. Not hardware measurements.'}
-        from waveforms import AD3
-        device=AD3()
-        try:
-            result=device.play_and_capture(dataset['amplitude_uv'],dataset['duration_ms'],
-                              awg_peak_v=req.awg_peak_v,channels=req.channels)
-            return {'mode':'ad3',**result}
-        finally:
-            device.close()
+        result = ad3_manager.run_temporary(
+            lambda device: device.play_and_capture(
+                dataset['amplitude_uv'], dataset['duration_ms'],
+                awg_peak_v=req.awg_peak_v, channels=req.channels
+            )
+        )
+        return {'mode': 'ad3', **result}
     except (ValueError, RuntimeError, OSError) as e:
         raise HTTPException(400, str(e))
 

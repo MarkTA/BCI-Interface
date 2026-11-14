@@ -70,6 +70,12 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(p),
     }),
+  digitalStatus: () => request<{ active: boolean; mode: string }>("/api/ad3/digital/status"),
+  digitalPulse: (p: { channel: number; frequency_hz: number; width_us: number; duration_s: number }) =>
+    request<{ active: boolean; mode: string }>("/api/ad3/digital/pulse", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p),
+    }),
+  digitalStop: () => request<{ active: boolean; mode: string }>("/api/ad3/digital/stop", { method: "POST" }),
   ports: () => request<{ device: string; description: string }[]>("/api/ports"),
   health: () => request<{ ok: boolean; service: string }>("/api/health"),
   ad3Connection: () =>

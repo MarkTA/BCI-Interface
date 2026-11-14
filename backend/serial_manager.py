@@ -1,5 +1,6 @@
 """One serial-port owner per FastAPI process; binary threshold transactions."""
 import asyncio
+import time
 from contextlib import suppress
 import serial
 from fpga_protocol import decode_ack, encode_threshold, voltage_to_code, CHANNEL_NAMES
@@ -17,6 +18,12 @@ class SerialManager:
         self.run_active = False
         self.mock = False
         self.emit = None
+        self.gpio_received = 0
+        self.gpio_forwarded = 0
+        self.gpio_suppressed = 0
+        self.event_received = 0
+        self._gpio_window = 0.0
+        self._gpio_window_sent = 0
 
     async def connect(self, owner, port, baud, mock, emit):
         if self.owner is not None:
@@ -31,8 +38,25 @@ class SerialManager:
         self.mock = mock
         self.emit = emit
         self.buffer.clear()
+        self.reset_diagnostics()
         if self.device:
             self.read_task = asyncio.create_task(self._reader())
+
+    def reset_diagnostics(self):
+        self.gpio_received = 0
+        self.gpio_forwarded = 0
+        self.gpio_suppressed = 0
+        self.event_received = 0
+        self._gpio_window = time.monotonic()
+        self._gpio_window_sent = 0
+
+    def diagnostic_counts(self):
+        return {
+            'gpio_received': self.gpio_received,
+            'gpio_forwarded': self.gpio_forwarded,
+            'gpio_suppressed': self.gpio_suppressed,
+            'events_received': self.event_received,
+        }
 
     async def disconnect(self, owner):
         if self.owner is not owner:
@@ -61,27 +85,60 @@ class SerialManager:
                     continue
                 self.buffer.extend(chunk)
                 while self.buffer:
-                    # The current FPGA firmware only defines 8-byte 0xAA 0x81 ACKs.
-                    # Unknown bytes are not interpreted as neural events.
+                    # All FPGA messages begin with AA followed by a type byte.
                     if self.buffer[0] != 0xAA:
                         del self.buffer[0]
                         continue
                     if len(self.buffer) < 2:
                         break
-                    if self.buffer[1] != 0x81:
+
+                    packet_type = self.buffer[1]
+                    packet_length = {0x81: 8, 0x02: 10, 0x03: 4}.get(packet_type)
+                    if packet_length is None:
+                        # Unknown header: advance one byte to resynchronize.
                         del self.buffer[0]
                         continue
-                    if len(self.buffer) < 8:
+                    if len(self.buffer) < packet_length:
                         break
-                    packet = bytes(self.buffer[:8])
-                    del self.buffer[:8]
-                    print(f"[UART RX] {packet.hex(' ').upper()}")
-                    print(f"[UART RX] Length: {len(packet)}")
-                    print(f"[UART RX] Header: {packet[:2].hex(' ').upper()}")
-                    if self.pending and not self.pending.done():
-                        self.pending.set_result(packet)
-                    elif self.emit:
-                        await self.emit({'type': 'info', 'message': f'Unsolicited ACK: {packet.hex(" ").upper()}'})
+
+                    packet = bytes(self.buffer[:packet_length])
+                    del self.buffer[:packet_length]
+
+                    if packet_type == 0x81:
+                        # Preserve the existing sequential threshold ACK workflow.
+                        print(f"[UART RX] {packet.hex(' ').upper()}")
+                        if self.pending and not self.pending.done():
+                            self.pending.set_result(packet)
+                        elif self.emit:
+                            await self.emit({
+                                'type': 'info',
+                                'message': f'Unsolicited ACK: {packet.hex(" ").upper()}',
+                            })
+                    elif packet_type == 0x03:
+                        # AA 03 NN PP: count every decoded packet, but cap UI traffic.
+                        self.gpio_received += 1
+                        if self.run_active and self.emit:
+                            now = time.monotonic()
+                            if now - self._gpio_window >= 1.0:
+                                self._gpio_window = now
+                                self._gpio_window_sent = 0
+                            if self._gpio_window_sent < 20:
+                                self._gpio_window_sent += 1
+                                self.gpio_forwarded += 1
+                                neg, pos = packet[2] & 0x0F, packet[3] & 0x0F
+                                await self.emit({
+                                    'type': 'gpio',
+                                    'message': f'[FPGA GPIO] N={neg:04b} P={pos:04b}',
+                                })
+                            else:
+                                self.gpio_suppressed += 1
+                    elif packet_type == 0x02:
+                        self.event_received += 1
+                        if self.run_active and self.emit:
+                            await self.emit({
+                                'type': 'uart_rx',
+                                'hex': packet.hex(' ').upper(),
+                            })
         except asyncio.CancelledError:
             raise
         except (serial.SerialException, OSError) as exc:

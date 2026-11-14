@@ -13,6 +13,7 @@ class FpgaSerialService {
     timer: ReturnType<typeof setTimeout>;
   } | null = null;
   private nextRequestId = 0;
+  private stopRequested = false;
 
   get active(): boolean {
     return this.connecting || this.socket !== null;
@@ -30,6 +31,7 @@ class FpgaSerialService {
     );
     const ws = new WebSocket(`ws://127.0.0.1:8000/ws?${params}`);
     this.socket = ws;
+    this.stopRequested = false;
     this.connecting = true;
     setSerial(false, "Connecting...");
 
@@ -52,6 +54,10 @@ class FpgaSerialService {
           channel?: number;
           request_id?: number;
           results?: ThresholdResult[];
+          gpio_received?: number;
+          gpio_forwarded?: number;
+          gpio_suppressed?: number;
+          events_received?: number;
         };
         if (packet.type === "status") {
           this.connecting = false;
@@ -61,8 +67,16 @@ class FpgaSerialService {
             mock,
           });
         } else if (packet.type === "run_state") {
+          this.stopRequested = packet.data !== "running";
           state.setRunActive(packet.data === "running");
           state.addLog("INFO", packet.message ?? `Run state: ${packet.data}`);
+        } else if (packet.type === "gpio_stats") {
+          state.addLog("INFO", `UART diagnostics: GPIO received ${packet.gpio_received ?? 0}, displayed ${packet.gpio_forwarded ?? 0}, rate-limited ${packet.gpio_suppressed ?? 0}; neural events ${packet.events_received ?? 0}`);
+        } else if (packet.type === "gpio") {
+          // Drop queued diagnostic messages once the user requests Stop.
+          if (!this.stopRequested && state.runActive) {
+            state.addLog("INFO", packet.message ?? "");
+          }
         } else if (packet.type === "threshold_complete") {
           if (this.pendingThreshold?.id === packet.request_id) {
             const pending = this.pendingThreshold;
@@ -140,6 +154,7 @@ class FpgaSerialService {
   setRunActive(active: boolean): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN || !useRuntime.getState().serialConnected) return false;
     if (active && (this.pendingThreshold || useRuntime.getState().serialMock)) return false;
+    if (!active) this.stopRequested = true;
     this.socket.send(JSON.stringify({ type: "set_run_state", active }));
     return true;
   }

@@ -23,6 +23,59 @@ export default function ResultsStep() {
     log = useRuntime((s) => s.log),
     capture = useRuntime((s) => s.capture);
 
+  type PulseScope = {time_us: number[]; voltage_v: number[]; min_v: number; max_v: number; pulse_width_us: number | null; edge_count: number; note: string};
+  const [pulseScope, setPulseScope] = useState<PulseScope | null>(null);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  async function capturePulseScope() {
+    setScopeBusy(true); setDigitalError(null);
+    try {
+      const base = window.location.port === "5173" ? "http://127.0.0.1:8000" : "";
+      const response = await fetch(`${base}/api/ad3/digital/scope`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Scope capture failed");
+      setPulseScope(data as PulseScope);
+    } catch (error) { setDigitalError(String(error)); }
+    finally { setScopeBusy(false); }
+  }
+  const [digitalBusy, setDigitalBusy] = useState(false);
+  const [digitalActive, setDigitalActive] = useState(false);
+  const [digitalStatusKnown, setDigitalStatusKnown] = useState(false);
+  const [digitalError, setDigitalError] = useState<string | null>(null);
+  const [pulseChannel, setPulseChannel] = useState(4);
+  const [pulseFrequency, setPulseFrequency] = useState(5);
+  const [pulseWidth, setPulseWidth] = useState(100);
+  const [pulseDuration, setPulseDuration] = useState(5);
+  useEffect(() => {
+    let mounted = true;
+    const poll = () => api.digitalStatus().then((result) => {
+      if (mounted) { setDigitalActive(result.active); setDigitalStatusKnown(true); }
+    }).catch(() => { if (mounted) setDigitalStatusKnown(false); });
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+  async function startDigitalPulse() {
+    setDigitalError(null);
+    setPulseScope(null);
+    if (pulseWidth >= 1_000_000 / pulseFrequency) {
+      setDigitalError("Pulse width must be shorter than the pulse period.");
+      return;
+    }
+    setDigitalBusy(true);
+    try {
+      await api.digitalPulse({ channel: pulseChannel, frequency_hz: pulseFrequency, width_us: pulseWidth, duration_s: pulseDuration });
+      setDigitalActive(true);
+      setDigitalStatusKnown(true);
+    } catch (error) { setDigitalError(String(error)); }
+    finally { setDigitalBusy(false); }
+  }
+  async function stopDigitalPulse() {
+    setDigitalBusy(true);
+    setDigitalError(null);
+    try { await api.digitalStop(); setDigitalActive(false); setDigitalStatusKnown(true); }
+    catch (error) { setDigitalStatusKnown(false); setDigitalError(String(error)); }
+    finally { setDigitalBusy(false); }
+  }
   const runActive = useRuntime((s) => s.runActive);
   const preview = useRuntime((s) => s.preview);
   const ad3Status = useRuntime((s) => s.ad3Status);
@@ -137,6 +190,32 @@ export default function ResultsStep() {
         {!runActive && appliedSignature !== thresholdSignature(thresholds, 1.6) && (
           <p className="run-control-note">Apply and acknowledge all eight thresholds to enable Start.</p>
         )}
+      </section>
+      <section className="card" aria-label="AD3 digital comparator test">
+        <h2>AD3 digital comparator test</h2>
+        <p className="muted">Hardware pulse validation (not yet derived from the selected neural waveform). DIO0–3 = N1–N4; DIO4–7 = P1–P4.</p>
+        <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
+          <label>Comparator <select value={pulseChannel} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseChannel(Number(e.target.value))}>
+            {Array.from({ length: 8 }, (_, i) => <option key={i} value={i}>{i < 4 ? `N${i + 1}` : `P${i - 3}`} (DIO{i})</option>)}
+          </select></label>
+          <label>Frequency (Hz) <input type="number" min="0.01" max="10000" step="any" value={pulseFrequency} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseFrequency(Number(e.target.value))} /></label>
+          <label>Width (µs) <input type="number" min="0.01" max="1000000" step="any" value={pulseWidth} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseWidth(Number(e.target.value))} /></label>
+          <label>Duration (s) <input type="number" min="0.1" max="60" step="any" value={pulseDuration} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseDuration(Number(e.target.value))} /></label>
+        </div>
+        <div className="actions" style={{ marginTop: 12 }}>
+          <button className="primary" disabled={digitalBusy || digitalActive || !runActive || !Number.isFinite(pulseFrequency) || pulseFrequency <= 0 || !Number.isFinite(pulseWidth) || pulseWidth <= 0 || !Number.isFinite(pulseDuration) || pulseDuration <= 0} onClick={startDigitalPulse}>Start pulses</button>
+          <button disabled={digitalBusy} onClick={stopDigitalPulse}>Stop / reset LOW</button>
+          <button disabled={digitalBusy || scopeBusy || !digitalActive} onClick={capturePulseScope}>{scopeBusy ? "Capturing…" : "Capture scope (CH1)"}</button>
+          <span className="muted">{!digitalStatusKnown ? "Digital output status unknown" : digitalActive ? "Digital output active" : "Digital output idle"}</span>
+        </div>
+        {pulseScope && <div style={{ marginTop: 12 }}>
+          <div className="muted">CH1: {pulseScope.min_v.toFixed(3)}–{pulseScope.max_v.toFixed(3)} V · Pulse width: {pulseScope.pulse_width_us === null ? "not detected" : `${pulseScope.pulse_width_us.toFixed(2)} µs`} · Edges: {pulseScope.edge_count}</div>
+          <svg viewBox="0 0 800 180" role="img" aria-label="Triggered scope waveform" style={{ width: "100%", height: 180, background: "#111827", borderRadius: 6 }}>
+            <polyline fill="none" stroke="#56d4f0" strokeWidth="1.5" points={pulseScope.voltage_v.filter((_, i) => i % 4 === 0).map((v, i, arr) => `${i * 800 / Math.max(1, arr.length - 1)},${165 - (v + 0.5) * 150 / 4.5}`).join(" ")} />
+          </svg>
+          <p className="muted">{pulseScope.note}</p>
+        </div>}
+        {digitalError && <p role="alert" style={{ color: "#d45" }}>{digitalError}</p>}
       </section>
       <section className="card">
         <div className="row between">

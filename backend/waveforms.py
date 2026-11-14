@@ -74,16 +74,184 @@ class AD3:
                 f"{function_name}: {message.value.decode(errors='replace')}"
             )
 
+    def _digital_clock_hz(self):
+        clock = C.c_double()
+        self._call("FDwfDigitalOutInternalClockInfo", self.h, C.byref(clock))
+        if clock.value <= 0:
+            raise DWFError("Invalid digital output clock")
+        return clock.value
+
+    def digital_low(self):
+        """Drive DIO0..DIO7 low using push-pull static outputs."""
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
+        for channel in range(8):
+            ch = C.c_int(channel)
+            self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
+            self._call("FDwfDigitalOutOutputSet", self.h, ch, C.c_int(0))  # PP
+            self._call("FDwfDigitalOutTypeSet", self.h, ch, C.c_int(0))  # pulse
+            self._call("FDwfDigitalOutDividerSet", self.h, ch, C.c_uint(1))
+            self._call("FDwfDigitalOutCounterInitSet", self.h, ch, C.c_int(0), C.c_uint(1))
+            self._call("FDwfDigitalOutCounterSet", self.h, ch, C.c_uint(1), C.c_uint(0))
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(1))
+
+    def digital_states(self, mask: int):
+        """Set DIO0..7 to a bitmask; bit 4 corresponds to P1."""
+        if not isinstance(mask, int) or not 0 <= mask <= 255:
+            raise ValueError("mask must be an integer from 0 to 255")
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
+        for channel in range(8):
+            ch = C.c_int(channel)
+            high = (mask >> channel) & 1
+            self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
+            self._call("FDwfDigitalOutOutputSet", self.h, ch, C.c_int(0))
+            self._call("FDwfDigitalOutTypeSet", self.h, ch, C.c_int(0))
+            self._call("FDwfDigitalOutDividerSet", self.h, ch, C.c_uint(1))
+            self._call("FDwfDigitalOutCounterInitSet", self.h, ch, C.c_int(high), C.c_uint(1))
+            self._call("FDwfDigitalOutCounterSet", self.h, ch, C.c_uint(1), C.c_uint(0))
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(1))
+        return {"mask": mask, "negative": mask & 15, "positive": (mask >> 4) & 15}
+
+    def digital_pulse_train(self, channel: int, frequency_hz: float, width_us: float):
+        """Generate hardware-timed active-high pulses; all other DIO pins low.
+
+        DWF pulse counter units are divider ticks. Counter0 is LOW time,
+        Counter1 is HIGH time, and initial state is LOW.
+        """
+        if type(channel) is not int or not 0 <= channel <= 7:
+            raise ValueError("channel must be DIO0..DIO7")
+        if not math.isfinite(frequency_hz) or frequency_hz <= 0:
+            raise ValueError("frequency_hz must be positive and finite")
+        if not math.isfinite(width_us) or width_us <= 0:
+            raise ValueError("width_us must be positive and finite")
+        period_s = 1 / frequency_hz
+        width_s = width_us * 1e-6
+        if width_s >= period_s:
+            raise ValueError("Pulse width must be shorter than the period")
+        clock_hz = self._digital_clock_hz()
+        # The digital pulse HIGH/LOW counters are limited to 16-bit values on
+        # this hardware. ctypes.c_uint only describes the API argument width;
+        # it does NOT imply the underlying hardware counters are 32-bit.
+        # Scale the clock so that *each* counter fits into 0xFFFF ticks.
+        max_counter = 0xFFFF
+        divider = max(1, math.ceil(clock_hz * max(width_s, period_s - width_s) / max_counter))
+        if divider > 0xFFFFFFFF:
+            raise ValueError("Frequency is too low for the digital output divider")
+        tick_s = divider / clock_hz
+        high = round(width_s / tick_s)
+        period = round(period_s / tick_s)
+        low = period - high
+        if not 1 <= high <= max_counter or not 1 <= low <= max_counter:
+            raise ValueError(
+                f"Pulse timing cannot be represented using 16-bit counters "
+                f"at {tick_s * 1e6:.3f} us resolution"
+            )
+        print(
+            f"[AD3 digital] DIO{channel}: requested={frequency_hz:g} Hz, "
+            f"{width_us:g} us; clock={clock_hz:g} Hz, divider={divider}, "
+            f"LOW={low} ticks, HIGH={high} ticks; "
+            f"actual={1 / (period * tick_s):.6f} Hz, {high * tick_s * 1e6:.3f} us",
+            flush=True,
+        )
+        self.digital_low()
+        ch = C.c_int(channel)
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
+        # Reassert the complete output configuration after digital_low().
+        self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
+        self._call("FDwfDigitalOutOutputSet", self.h, ch, C.c_int(0))  # push-pull
+        self._call("FDwfDigitalOutTypeSet", self.h, ch, C.c_int(0))  # pulse
+        self._call("FDwfDigitalOutDividerSet", self.h, ch, C.c_uint(divider))
+        self._call("FDwfDigitalOutCounterInitSet", self.h, ch, C.c_int(0), C.c_uint(1))
+        self._call("FDwfDigitalOutCounterSet", self.h, ch, C.c_uint(low), C.c_uint(high))
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(1))
+        return {"channel": channel, "frequency_hz": 1 / (period * tick_s),
+                "width_us": high * tick_s * 1e6, "clock_hz": clock_hz,
+                "divider": divider, "low_ticks": low, "high_ticks": high}
+
+    def capture_pulse_scope(self, sample_rate_hz=2_000_000.0, count=8192):
+        """Triggered CH1 scope capture while digital outputs remain running.
+
+        Wiring: selected DIO -> Scope 1+, Scope 1- -> GND.
+        Trigger on rising crossing at 1.65 V. No WaveGen or digital reset.
+        """
+        if count < 1024 or count > 16384:
+            raise ValueError("Unsupported scope sample count")
+        self._call("FDwfDeviceAutoConfigureSet", self.h, C.c_int(0))
+        self._call("FDwfAnalogInReset", self.h)
+        self._call("FDwfAnalogInChannelEnableSet", self.h, C.c_int(0), C.c_int(1))
+        self._call("FDwfAnalogInChannelEnableSet", self.h, C.c_int(1), C.c_int(0))
+        self._call("FDwfAnalogInChannelRangeSet", self.h, C.c_int(0), C.c_double(5.0))
+        self._call("FDwfAnalogInChannelOffsetSet", self.h, C.c_int(0), C.c_double(0.0))
+        self._call("FDwfAnalogInFrequencySet", self.h, C.c_double(sample_rate_hz))
+        self._call("FDwfAnalogInBufferSizeSet", self.h, C.c_int(count))
+        # Trigger source 0 = None (free-running acquisition)
+        self._call("FDwfAnalogInTriggerSourceSet", self.h, C.c_int(0))
+        self._call("FDwfAnalogInTriggerChannelSet", self.h, C.c_int(0))
+        self._call("FDwfAnalogInTriggerTypeSet", self.h, C.c_int(0))  # edge
+        self._call("FDwfAnalogInTriggerConditionSet", self.h, C.c_int(0))
+        self._call("FDwfAnalogInTriggerLevelSet", self.h, C.c_double(1.65))
+        self._call("FDwfAnalogInTriggerPositionSet", self.h, C.c_double(0.0))
+        self._call("FDwfAnalogInTriggerAutoTimeoutSet", self.h, C.c_double(0.0))
+        try:
+            self._call("FDwfAnalogInConfigure", self.h, C.c_int(1), C.c_int(1))
+            state = C.c_byte()
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                self._call("FDwfAnalogInStatus", self.h, C.c_int(1), C.byref(state))
+                if state.value == 2:
+                    break
+                time.sleep(0.002)
+            else:
+                raise DWFError("Scope trigger timed out: check DIO-to-CH1+ wiring and active pulses")
+            raw = (C.c_double * count)()
+            self._call("FDwfAnalogInStatusData", self.h, C.c_int(0), raw, C.c_int(count))
+            samples = list(raw)
+            if not all(math.isfinite(v) for v in samples):
+                raise DWFError("Non-finite scope samples")
+            # Interpolated threshold crossings yield sub-sample width estimates.
+            threshold = (min(samples) + max(samples)) / 2
+            crossings = []
+            for i in range(1, len(samples)):
+                a, b = samples[i-1], samples[i]
+                if (a < threshold <= b) or (a >= threshold > b):
+                    frac = (threshold-a)/(b-a) if b != a else 0
+                    crossings.append(((i-1+frac)/sample_rate_hz, b > a))
+            widths = [ (crossings[i+1][0]-crossings[i][0])*1e6
+                       for i in range(len(crossings)-1)
+                       if crossings[i][1] and not crossings[i+1][1] ]
+            return {
+                "sample_rate_hz": sample_rate_hz,
+                "time_us": [round((i-count//2)*1e6/sample_rate_hz, 3) for i in range(count)],
+                "voltage_v": [round(v, 5) for v in samples],
+                "min_v": round(min(samples), 5), "max_v": round(max(samples), 5),
+                "pulse_width_us": round(widths[0], 3) if widths else None,
+                "edge_count": len(crossings),
+                "note": "Triggered short-window capture; cannot determine 5 Hz repetition rate from this record."
+            }
+        finally:
+            self._call("FDwfAnalogInConfigure", self.h, C.c_int(0), C.c_int(0))
+
+    def stop_digital(self):
+        """Stop the active pattern and drive all eight outputs LOW.
+
+        Keep the device handle open: closing it immediately can release DIO pins.
+        """
+        self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
+        self._call("FDwfDigitalOutReset", self.h)
+        self.digital_low()
+
     def close(self):
         if not self.h.value:
             return
         try:
-            self._call("FDwfAnalogOutConfigure", self.h, C.c_int(0), C.c_int(0))
+            self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
         finally:
             try:
-                self._call("FDwfDeviceClose", self.h)
+                self._call("FDwfAnalogOutConfigure", self.h, C.c_int(0), C.c_int(0))
             finally:
-                self.h.value = 0
+                try:
+                    self._call("FDwfDeviceClose", self.h)
+                finally:
+                    self.h.value = 0
 
     def check_readiness(self):
         """Verify a short free-running CH1 acquisition without enabling WaveGen.
