@@ -48,3 +48,23 @@ def decode_ack(packet: bytes, sequence: int, channel: int, code: int) -> Thresho
     if spi != expected:
         raise ValueError(f"SPI command mismatch: got {spi:06X}, expected {expected:06X}")
     return ThresholdAck(sequence, channel, code, spi)
+
+
+# Runtime GPIO reporting (one common bitstream for both run modes).
+# Request reuses 7-byte DAC framing: AA 04 SEQ 00 00 ENABLE XOR(04..ENABLE).
+# Response: AA 84 SEQ ENABLE XOR(84..ENABLE).
+def encode_gpio_debug(sequence: int, enabled: bool) -> bytes:
+    if not isinstance(sequence, int) or not 0 <= sequence <= 255 or type(enabled) is not bool:
+        raise ValueError("Invalid GPIO debug sequence/mode")
+    body = bytes((0x04, sequence, 0, 0, int(enabled)))
+    return bytes((START,)) + body + bytes((xor_checksum(body),))
+
+
+def decode_gpio_debug_ack(packet: bytes, sequence: int, enabled: bool) -> bool:
+    if len(packet) != 5 or packet[:2] != b"\xaa\x84":
+        raise ValueError("Invalid GPIO debug ACK header or length")
+    if xor_checksum(packet[1:4]) != packet[4]:
+        raise ValueError("GPIO debug ACK checksum mismatch")
+    if packet[2] != sequence or packet[3] != int(enabled):
+        raise ValueError("GPIO debug ACK mode or sequence mismatch")
+    return bool(packet[3])

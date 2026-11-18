@@ -1,4 +1,4 @@
-import { useRuntime, type ThresholdAckResult } from "../state/store";
+import { useRuntime, type ThresholdAckResult, type GpioStats, type GpioTraceState, type NeuralEvent, type NeuralStats } from "../state/store";
 
 /** One WebSocket per browser page, independent of mounted React steps. */
 export type ThresholdResult = ThresholdAckResult;
@@ -13,7 +13,11 @@ class FpgaSerialService {
     timer: ReturnType<typeof setTimeout>;
   } | null = null;
   private nextRequestId = 0;
-  private stopRequested = false;
+  private pendingRun: {
+    resolve: () => void;
+    reject: (reason: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
 
   get active(): boolean {
     return this.connecting || this.socket !== null;
@@ -31,7 +35,6 @@ class FpgaSerialService {
     );
     const ws = new WebSocket(`ws://127.0.0.1:8000/ws?${params}`);
     this.socket = ws;
-    this.stopRequested = false;
     this.connecting = true;
     setSerial(false, "Connecting...");
 
@@ -54,10 +57,19 @@ class FpgaSerialService {
           channel?: number;
           request_id?: number;
           results?: ThresholdResult[];
-          gpio_received?: number;
-          gpio_forwarded?: number;
-          gpio_suppressed?: number;
-          events_received?: number;
+          gpio_packets?: number;
+          total_edges?: number;
+          edges_by_channel?: Record<string, number>;
+          negative_mask?: number;
+          positive_mask?: number;
+          states?: GpioTraceState[];
+          events?: NeuralEvent[];
+          stats?: NeuralStats;
+          received?: number;
+          timeouts?: number;
+          saturations?: number;
+          overlaps?: number;
+          invalid_sequences?: number;
         };
         if (packet.type === "status") {
           this.connecting = false;
@@ -67,16 +79,39 @@ class FpgaSerialService {
             mock,
           });
         } else if (packet.type === "run_state") {
-          this.stopRequested = packet.data !== "running";
+          if (packet.data === "running" && this.pendingRun) {
+            const pending = this.pendingRun;
+            this.pendingRun = null;
+            clearTimeout(pending.timer);
+            pending.resolve();
+          }
+          if (packet.data === "running") {
+            state.setGpioStats(null);
+            state.clearGpioTrace();
+            state.clearNeuralEvents();
+          }
           state.setRunActive(packet.data === "running");
           state.addLog("INFO", packet.message ?? `Run state: ${packet.data}`);
+        } else if (packet.type === "run_error") {
+          state.addLog("ERROR", packet.message ?? "FPGA run configuration failed");
+          this.failRun(packet.message ?? "FPGA did not acknowledge GPIO debug mode");
+        } else if (packet.type === "gpio_mode") {
+          state.addLog("INFO", packet.message ?? "FPGA GPIO mode confirmed");
         } else if (packet.type === "gpio_stats") {
-          state.addLog("INFO", `UART diagnostics: GPIO received ${packet.gpio_received ?? 0}, displayed ${packet.gpio_forwarded ?? 0}, rate-limited ${packet.gpio_suppressed ?? 0}; neural events ${packet.events_received ?? 0}`);
-        } else if (packet.type === "gpio") {
-          // Drop queued diagnostic messages once the user requests Stop.
-          if (!this.stopRequested && state.runActive) {
-            state.addLog("INFO", packet.message ?? "");
+          state.setGpioStats(packet as GpioStats);
+        } else if (packet.type === "gpio_trace") {
+          const valid = (packet.states ?? []).filter(
+            (row): row is GpioTraceState =>
+              Array.isArray(row) && row.length === 2 &&
+              row.every((value) => Number.isInteger(value) && value >= 0 && value <= 15),
+          );
+          if (valid.length) state.appendGpioTrace(valid);
+        } else if (packet.type === "neural_events") {
+          if (packet.events && packet.stats) {
+            state.appendNeuralEvents(packet.events, packet.stats);
           }
+        } else if (packet.type === "neural_stats") {
+          state.setNeuralStats(packet as NeuralStats);
         } else if (packet.type === "threshold_complete") {
           if (this.pendingThreshold?.id === packet.request_id) {
             const pending = this.pendingThreshold;
@@ -125,6 +160,7 @@ class FpgaSerialService {
       this.socket = null;
       this.connecting = false;
       this.failThreshold("Serial connection closed");
+      this.failRun("Serial connection closed");
       const state = useRuntime.getState();
       state.setSerial(false, "Disconnected");
       state.addLog("INFO", "Serial socket closed");
@@ -137,6 +173,7 @@ class FpgaSerialService {
     this.socket = null;
     this.connecting = false;
     this.failThreshold("Serial connection disconnected");
+    this.failRun("Serial connection disconnected");
     ws.close();
     const state = useRuntime.getState();
     state.setSerial(false, "Disconnected");
@@ -151,11 +188,36 @@ class FpgaSerialService {
     pending.reject(new Error(message));
   }
 
+  private failRun(message: string): void {
+    const pending = this.pendingRun;
+    if (!pending) return;
+    this.pendingRun = null;
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+  }
+
+  /** Program the runtime GPIO mode over UART and wait for FPGA acknowledgment. */
+  armRun(gpioDebug: boolean): Promise<void> {
+    if (this.pendingRun || this.pendingThreshold || useRuntime.getState().runActive ||
+        this.socket?.readyState !== WebSocket.OPEN ||
+        !useRuntime.getState().serialConnected || useRuntime.getState().serialMock) {
+      return Promise.reject(new Error("Connect the physical FPGA and finish threshold updates first"));
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => this.failRun("FPGA GPIO mode acknowledgment timed out"), 5000);
+      this.pendingRun = { resolve, reject, timer };
+      try {
+        this.socket!.send(JSON.stringify({ type: "set_run_state", active: true, gpio_debug: gpioDebug }));
+      } catch (error) {
+        this.failRun(error instanceof Error ? error.message : "WebSocket send failed");
+      }
+    });
+  }
+
   setRunActive(active: boolean): boolean {
     if (this.socket?.readyState !== WebSocket.OPEN || !useRuntime.getState().serialConnected) return false;
     if (active && (this.pendingThreshold || useRuntime.getState().serialMock)) return false;
-    if (!active) this.stopRequested = true;
-    this.socket.send(JSON.stringify({ type: "set_run_state", active }));
+    this.socket.send(JSON.stringify({ type: "set_run_state", active, gpio_debug: false }));
     return true;
   }
 

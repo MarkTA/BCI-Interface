@@ -146,6 +146,40 @@ export type ThresholdAckResult = {
   status: "encoded";
 };
 
+// Ordered FPGA UART GPIO reports; [N nibble, P nibble]. No hardware timestamps.
+export type GpioTraceState = [number, number];
+export type GpioStats = {
+  gpio_packets: number;
+  total_edges: number;
+  edges_by_channel: Record<string, number>;
+  negative_mask: number;
+  positive_mask: number;
+};
+
+export type NeuralFlags = {
+  saturation: boolean;
+  timeout: boolean;
+  overlap: boolean;
+  invalid_sequence: boolean;
+};
+export type NeuralEvent = {
+  channel: number;
+  timestamp_us: number; // FPGA 24-bit clock, wraps at 16.777216 s
+  peak: number;
+  trough: number;
+  time_to_peak_us: number;
+  flags_mask: number;
+  flags: NeuralFlags;
+  raw_hex: string;
+};
+export type NeuralStats = {
+  received: number;
+  timeouts: number;
+  saturations: number;
+  overlaps: number;
+  invalid_sequences: number;
+};
+
 type Runtime = {
   preview: Waveform | null;
   capture: Capture | null;
@@ -153,6 +187,16 @@ type Runtime = {
   setCapture: (x: Capture | null) => void;
   ad3Status: "unchecked" | "checking" | "connected" | "failed";
   setAd3Status: (status: Runtime["ad3Status"]) => void;
+  gpioStats: GpioStats | null;
+  setGpioStats: (stats: GpioStats | null) => void;
+  gpioTrace: GpioTraceState[];
+  appendGpioTrace: (states: GpioTraceState[]) => void;
+  clearGpioTrace: () => void;
+  neuralEvents: NeuralEvent[];
+  neuralStats: NeuralStats | null;
+  appendNeuralEvents: (events: NeuralEvent[], stats: NeuralStats) => void;
+  setNeuralStats: (stats: NeuralStats) => void;
+  clearNeuralEvents: () => void;
   runActive: boolean;
   setRunActive: (active: boolean) => void;
   serialConnected: boolean;
@@ -183,6 +227,22 @@ export const useRuntime = create<Runtime>((set) => ({
   setCapture: (capture) => set({ capture }),
   ad3Status: "unchecked",
   setAd3Status: (ad3Status) => set({ ad3Status }),
+  gpioStats: null,
+  setGpioStats: (gpioStats) => set({ gpioStats }),
+  gpioTrace: [],
+  appendGpioTrace: (states) => set((s) => ({
+    // Bound retention to ~2-4s of history at the expected diagnostic rate.
+    gpioTrace: [...s.gpioTrace, ...states].slice(-2000),
+  })),
+  clearGpioTrace: () => set({ gpioTrace: [] }),
+  neuralEvents: [],
+  neuralStats: null,
+  appendNeuralEvents: (events, stats) => set((s) => ({
+    neuralEvents: [...s.neuralEvents, ...events].slice(-250),
+    neuralStats: stats,
+  })),
+  setNeuralStats: (neuralStats) => set({ neuralStats }),
+  clearNeuralEvents: () => set({ neuralEvents: [], neuralStats: null }),
   runActive: false,
   setRunActive: (runActive) => set({ runActive }),
   serialConnected: false,
@@ -200,7 +260,7 @@ export const useRuntime = create<Runtime>((set) => ({
         serialConnected && !details?.mock ? (details?.baud ?? null) : null,
       serialMock: serialConnected && !!details?.mock,
       ...(!serialConnected
-        ? { runActive: false, fpgaVerified: false, thresholdAcks: {}, appliedSignature: null }
+        ? { runActive: false, gpioStats: null, gpioTrace: [], neuralEvents: [], neuralStats: null, fpgaVerified: false, thresholdAcks: {}, appliedSignature: null }
         : {}),
     }),
   log: [],

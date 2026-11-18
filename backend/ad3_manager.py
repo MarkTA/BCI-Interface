@@ -1,7 +1,7 @@
 """Exclusive AD3 ownership for FastAPI operations and persistent digital tests."""
 import logging
 import threading
-from waveforms import AD3
+from waveforms import AD3, DEFAULT_AFE_GAIN_VV
 
 log = logging.getLogger(__name__)
 
@@ -61,10 +61,18 @@ class AD3Manager:
                 elif mode == 'pulse':
                     info = self._device.digital_pulse_train(
                         kwargs['channel'], kwargs['frequency_hz'], kwargs['width_us'])
+                elif mode == 'comparators':
+                    info = self._device.digital_comparator_simulation(
+                        kwargs['sample_values_uv'], kwargs['duration_ms'],
+                        kwargs['thresholds_mv'],
+                        afe_gain=kwargs.get('afe_gain', DEFAULT_AFE_GAIN_VV),
+                        sample_count=kwargs.get('sample_count', 1024),
+                        bias_v=kwargs.get('bias_v', 1.6),
+                    )
                 else:
                     raise ValueError('Unknown digital mode')
                 self._status = {'active': True, 'mode': mode, **info}
-                if mode == 'pulse':
+                if mode in ('pulse', 'comparators'):
                     duration = kwargs['duration_s']
                     generation = self._generation
                     self._timer = threading.Timer(duration, self._timeout, args=(generation,))
@@ -82,11 +90,19 @@ class AD3Manager:
                 self._status = {'active': False, 'mode': 'error'}
                 raise
 
-    def capture_pulse_scope(self):
+    def capture_pulse_scope(self, sample_rate_hz=2_000_000.0, count=8192):
         with self._lock:
-            if not self._device or self._status.get('mode') != 'pulse' or not self._status.get('active'):
-                raise RuntimeError('Start a pulse train before capturing the scope')
-            return self._device.capture_pulse_scope()
+            if not self._device or self._status.get('mode') not in ('pulse', 'comparators') \
+                    or not self._status.get('active'):
+                raise RuntimeError('Start a pulse train or comparator simulation before capturing')
+            return self._device.capture_pulse_scope(sample_rate_hz, count)
+
+    def hardware_status(self):
+        """Actual DWF digital instrument state, not just manager bookkeeping."""
+        with self._lock:
+            if not self._device:
+                return {'state_name': 'device_closed'}
+            return self._device.digital_output_status()
 
     def status(self):
         with self._lock:

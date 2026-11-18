@@ -39,6 +39,43 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   return r.json() as Promise<T>;
 }
+export type ComparatorRequest = {
+  dataset: string;
+  thresholds_mv: number[]; // DAC order P1..P4, N1..N4; signed offsets from 1.6 V
+  playback_speed: number;   // 1.0 = Kenny's original waveform timing
+  gpio_debug_enabled: boolean; // Must match ENABLE_GPIO_DEBUG in FPGA bitstream
+  duration_s: number;
+};
+export type ComparatorPreview = {
+  dataset: string;
+  source_duration_ms: number;
+  cycle_duration_ms: number;
+  playback_speed: number;
+  gpio_debug_enabled: boolean;
+  sample_count: number;
+  sample_interval_us: number;
+  afe_peak_mv: number;      // Derived modeled AFE peak (mV)
+  afe_gain: number;         // Nominal analog AFE voltage gain (V/V)
+  source_peak_uv: number;   // Actual peak magnitude in selected CSV (µV)
+  signal_range_mv: [number, number];
+  expected_edges_per_cycle: Record<string, number>;
+  // One ideal repeating digital cycle: 8-bit DIO masks at each transition.
+  // N1..N4 bits 0..3; P1..P4 bits 4..7.
+  reference_states: { sample_index: number; mask: number }[];
+  expected_edges_per_second: number;
+  warning: string | null;
+};
+export type ComparatorStart = ComparatorPreview & {
+  active: boolean;
+  mode: string;
+  sample_rate_hz: number;
+  channels: Record<string, number>;
+};
+export type DigitalStatus = { active: boolean; mode: string; outputs_low?: boolean };
+export type PulseScope = {
+  time_us: number[]; voltage_v: number[]; min_v: number;
+  max_v: number; pulse_width_us: number | null; edge_count: number; note: string;
+};
 export const api = {
   datasets: () => request<{ datasets: string[] }>("/api/datasets"),
   dataset: (name: string) =>
@@ -70,12 +107,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(p),
     }),
-  digitalStatus: () => request<{ active: boolean; mode: string }>("/api/ad3/digital/status"),
-  digitalPulse: (p: { channel: number; frequency_hz: number; width_us: number; duration_s: number }) =>
-    request<{ active: boolean; mode: string }>("/api/ad3/digital/pulse", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p),
+  comparatorPreview: (req: ComparatorRequest) =>
+    request<ComparatorPreview>("/api/ad3/digital/comparators/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
     }),
-  digitalStop: () => request<{ active: boolean; mode: string }>("/api/ad3/digital/stop", { method: "POST" }),
+  comparatorStart: (req: ComparatorRequest) =>
+    request<ComparatorStart>("/api/ad3/digital/comparators", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    }),
+  digitalStatus: () => request<DigitalStatus>("/api/ad3/digital/status"),
+  digitalStop: () => request<DigitalStatus>("/api/ad3/digital/stop", { method: "POST" }),
+  digitalScope: () => request<PulseScope>("/api/ad3/digital/scope", { method: "POST" }),
   ports: () => request<{ device: string; description: string }[]>("/api/ports"),
   health: () => request<{ ok: boolean; service: string }>("/api/health"),
   ad3Connection: () =>

@@ -1,252 +1,293 @@
-import React, { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../state/api";
+import React, { useEffect, useRef, useState } from "react";
+import { api, type ComparatorPreview, type ComparatorStart, type ComparatorRequest, type PulseScope } from "../state/api";
 import { useConfig, useRuntime, thresholdSignature } from "../state/store";
 import { ScopePair } from "../components/ScopeView";
 import { fpgaSerial } from "../services/fpgaSerial";
 import UartConnection from "../components/UartConnection";
+import GpioComparison from "../components/ComparatorSequencePanel";
+import NeuralEventPanel from "../components/NeuralEventPanel";
+
+const CHANNELS = ["N1", "N2", "N3", "N4", "P1", "P2", "P3", "P4"];
+type RunMode = "events" | "gpio";
+
+/** The backend acknowledges arming through the serial WebSocket. Wait for that
+ * acknowledgement before requesting AD3 playback (the API requires it).
+ */
+function waitForRunState(active: boolean, timeoutMs = 5000): Promise<void> {
+  if (useRuntime.getState().runActive === active) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let unsubscribe = () => {};
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      unsubscribe();
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = window.setTimeout(() =>
+      finish(new Error(`FPGA did not acknowledge ${active ? "Start" : "Stop"} run.`)), timeoutMs);
+    unsubscribe = useRuntime.subscribe((state) => {
+      if (state.runActive === active) finish();
+    });
+    // Handle an acknowledgment arriving between the initial check and subscribe.
+    if (useRuntime.getState().runActive === active) finish();
+  });
+}
+
 export default function ResultsStep() {
-  const ports = useQuery({ queryKey: ["ports"], queryFn: api.ports, retry: 0 });
-  const [port, setPort] = useState(""),
-    [mock, setMock] = useState(true),
-    [baud, setBaud] = useState(115200),
-    [input, setInput] = useState("PING"),
-    [newLine, setNewLine] = useState(true);
-
-  const connected = useRuntime((s) => s.serialConnected),
-    status = useRuntime((s) => s.serialStatus),
-    serialPort = useRuntime((s) => s.serialPort),
-    serialBaud = useRuntime((s) => s.serialBaud),
-    serialMock = useRuntime((s) => s.serialMock),
-    addLog = useRuntime((s) => s.addLog),
-    clearLog = useRuntime((s) => s.clearLog),
-    log = useRuntime((s) => s.log),
-    capture = useRuntime((s) => s.capture);
-
-  type PulseScope = {time_us: number[]; voltage_v: number[]; min_v: number; max_v: number; pulse_width_us: number | null; edge_count: number; note: string};
-  const [pulseScope, setPulseScope] = useState<PulseScope | null>(null);
-  const [scopeBusy, setScopeBusy] = useState(false);
-  async function capturePulseScope() {
-    setScopeBusy(true); setDigitalError(null);
-    try {
-      const base = window.location.port === "5173" ? "http://127.0.0.1:8000" : "";
-      const response = await fetch(`${base}/api/ad3/digital/scope`, { method: "POST" });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Scope capture failed");
-      setPulseScope(data as PulseScope);
-    } catch (error) { setDigitalError(String(error)); }
-    finally { setScopeBusy(false); }
-  }
-  const [digitalBusy, setDigitalBusy] = useState(false);
-  const [digitalActive, setDigitalActive] = useState(false);
-  const [digitalStatusKnown, setDigitalStatusKnown] = useState(false);
-  const [digitalError, setDigitalError] = useState<string | null>(null);
-  const [pulseChannel, setPulseChannel] = useState(4);
-  const [pulseFrequency, setPulseFrequency] = useState(5);
-  const [pulseWidth, setPulseWidth] = useState(100);
-  const [pulseDuration, setPulseDuration] = useState(5);
-  useEffect(() => {
-    let mounted = true;
-    const poll = () => api.digitalStatus().then((result) => {
-      if (mounted) { setDigitalActive(result.active); setDigitalStatusKnown(true); }
-    }).catch(() => { if (mounted) setDigitalStatusKnown(false); });
-    poll();
-    const timer = window.setInterval(poll, 1000);
-    return () => { mounted = false; window.clearInterval(timer); };
-  }, []);
-  async function startDigitalPulse() {
-    setDigitalError(null);
-    setPulseScope(null);
-    if (pulseWidth >= 1_000_000 / pulseFrequency) {
-      setDigitalError("Pulse width must be shorter than the pulse period.");
-      return;
-    }
-    setDigitalBusy(true);
-    try {
-      await api.digitalPulse({ channel: pulseChannel, frequency_hz: pulseFrequency, width_us: pulseWidth, duration_s: pulseDuration });
-      setDigitalActive(true);
-      setDigitalStatusKnown(true);
-    } catch (error) { setDigitalError(String(error)); }
-    finally { setDigitalBusy(false); }
-  }
-  async function stopDigitalPulse() {
-    setDigitalBusy(true);
-    setDigitalError(null);
-    try { await api.digitalStop(); setDigitalActive(false); setDigitalStatusKnown(true); }
-    catch (error) { setDigitalStatusKnown(false); setDigitalError(String(error)); }
-    finally { setDigitalBusy(false); }
-  }
-  const runActive = useRuntime((s) => s.runActive);
-  const preview = useRuntime((s) => s.preview);
+  const dataset = useConfig((s) => s.datasetName);
+  const thresholds = useConfig((s) => s.thresholdsMv); // DAC order: P1–P4, N1–N4
   const ad3Status = useRuntime((s) => s.ad3Status);
+  const connected = useRuntime((s) => s.serialConnected);
+  const serialMock = useRuntime((s) => s.serialMock);
+  const serialPort = useRuntime((s) => s.serialPort);
+  const runActive = useRuntime((s) => s.runActive);
   const fpgaVerified = useRuntime((s) => s.fpgaVerified);
   const appliedSignature = useRuntime((s) => s.appliedSignature);
-  const dataset = useConfig((s) => s.datasetName),
-    thresholds = useConfig((s) => s.thresholdsMv),
-    bias = useConfig((s) => s.biasV),
-    mode = useConfig((s) => s.comparatorMode);
+  const gpioStats = useRuntime((s) => s.gpioStats);
+  const gpioTrace = useRuntime((s) => s.gpioTrace);
+  const clearGpioTrace = useRuntime((s) => s.clearGpioTrace);
+  const log = useRuntime((s) => s.log);
+  const clearLog = useRuntime((s) => s.clearLog);
+  const addLog = useRuntime((s) => s.addLog);
 
-  // Synchronize controls with the active serial connection.
-  useEffect(() => {
-    if (connected) {
-      if (serialPort) setPort(serialPort);
-      if (serialBaud) setBaud(serialBaud);
-      setMock(serialMock);
-    }
-  }, [connected, serialPort, serialBaud, serialMock]);
+  const [durationS, setDurationS] = useState(10);
+  const [plan, setPlan] = useState<ComparatorPreview | null>(null);
+  const [lastStart, setLastStart] = useState<ComparatorStart | null>(null);
+  const [lastMode, setLastMode] = useState<RunMode | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  const [scope, setScope] = useState<PulseScope | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [output, setOutput] = useState({ active: false, mode: "idle" });
+  const sawComparatorOutput = useRef(false);
+  const activeRef = useRef(runActive);
+  activeRef.current = runActive;
 
-  // Select the first available port only when disconnected.
+  const running = runActive || output.active;
+  const canArm = connected && !serialMock &&
+    appliedSignature === thresholdSignature(thresholds, 1.6);
+  const valid = Boolean(dataset) && thresholds.length === 8 &&
+    thresholds.every((v, i) => Number.isFinite(v) && (i < 4 ? v >= 0 : v <= 0)) &&
+    Number.isFinite(durationS) && durationS >= 1 && durationS <= 60;
+
+  function requestFor(mode: RunMode): ComparatorRequest {
+    return {
+      dataset,
+      thresholds_mv: [...thresholds],
+      playback_speed: mode === "gpio" ? 0.25 : 1,
+      gpio_debug_enabled: mode === "gpio",
+      duration_s: durationS,
+    };
+  }
+
+  const requestKey = JSON.stringify({ dataset, thresholds, durationS });
   useEffect(() => {
-    if (!connected && !port && ports.data?.length) {
-      setPort(ports.data[0].device);
+    setPlan(null);
+    setLastStart(null);
+    setScope(null);
+  }, [requestKey]);
+
+  useEffect(() => {
+    if (!runActive) sawComparatorOutput.current = false;
+  }, [runActive]);
+
+  useEffect(() => {
+    let mounted = true;
+    const poll = () => {
+      void api.digitalStatus().then((s) => {
+        if (!mounted) return;
+        setOutput({ active: s.active, mode: s.mode });
+        if (s.active && s.mode === "comparators") sawComparatorOutput.current = true;
+        // Automatic AD3 timeout must also disarm FPGA event reception.
+        if (!s.active && sawComparatorOutput.current && activeRef.current) {
+          sawComparatorOutput.current = false;
+          fpgaSerial.setRunActive(false);
+        }
+      }).catch(() => {
+        if (mounted) setOutput({ active: false, mode: "unknown" });
+      });
+    };
+    poll();
+    const interval = window.setInterval(poll, 1000);
+    return () => { mounted = false; window.clearInterval(interval); };
+  }, []);
+
+  async function startRun(mode: RunMode) {
+    if (busy || running || !valid || !canArm) return;
+    setBusy(true);
+    setError(null);
+    setPlan(null);
+    setLastStart(null);
+    setScope(null);
+    let armed = false;
+    try {
+      const req = requestFor(mode);
+      // Automatic preview validates the dataset, thresholds and (debug only)
+      // the UART throughput limit. No separate Preview/Arm action is required.
+      const preview = await api.comparatorPreview(req);
+      if (preview.warning) throw new Error(preview.warning);
+      clearGpioTrace();
+      armed = true; // ensure cleanup even if the FPGA mode ACK fails
+      await fpgaSerial.armRun(mode === "gpio");
+      const started = await api.comparatorStart(req);
+      setPlan(started);
+      setLastStart(started);
+      setLastMode(mode);
+      sawComparatorOutput.current = true;
+      setOutput({ active: true, mode: "comparators" });
+      addLog("INFO", `${mode === "gpio" ? "GPIO debug" : "Neural event"} run: ${started.dataset}, ${started.cycle_duration_ms.toFixed(3)} ms/cycle`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      if (armed) {
+        // If the AD3 start fails, do not leave the UART receiver armed.
+        fpgaSerial.setRunActive(false);
+        try { await api.digitalStop(); } catch { /* preserve original error */ }
+      }
+    } finally {
+      setBusy(false);
     }
-  }, [connected, ports.data, port]);
-  function connect() {
-    if (fpgaSerial.active) fpgaSerial.disconnect();
-    else fpgaSerial.connect(port, baud, mock);
   }
-  function send() {
-    fpgaSerial.sendText(input + (newLine ? "\n" : ""));
+
+  async function stopRun() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (runActive) {
+        if (!fpgaSerial.setRunActive(false)) {
+          throw new Error("Could not send Stop to the FPGA serial bridge.");
+        }
+        // The backend also stops the AD3 before acknowledging Stop.
+        await waitForRunState(false);
+      } else {
+        await api.digitalStop();
+      }
+      setOutput({ active: false, mode: "idle" });
+      sawComparatorOutput.current = false;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      // Best-effort physical output shutdown if the WebSocket is unavailable.
+      try { await api.digitalStop(); } catch { /* retain error for the user */ }
+    } finally {
+      setBusy(false);
+    }
   }
+
+  async function captureScope() {
+    setScopeBusy(true);
+    setError(null);
+    try { setScope(await api.digitalScope()); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setScopeBusy(false); }
+  }
+
   function exportLog() {
-    const text = log
-      .map((x) => `${x.time}\t${x.kind}\t${JSON.stringify(x.text)}`)
-      .join("\r\n");
-    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `bci-terminal-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const content = log.map((entry) => `${entry.time}\t${entry.kind}\t${entry.text}`).join("\r\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cortex-serial-${Date.now()}.txt`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  function snapshot() {
-    const blob = new Blob(
-      [
-        JSON.stringify(
-          {
-            savedAt: new Date().toISOString(),
-            dataset,
-            thresholdsMv: thresholds,
-            biasV: bias,
-            comparatorMode: mode,
-            capture,
-            serialLog: log,
-          },
-          null,
-          2,
-        ),
-      ],
-      { type: "application/json" },
-    );
-    const url = URL.createObjectURL(blob),
-      a = document.createElement("a");
-    a.href = url;
-    a.download = `bci-experiment-${Date.now()}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  return (
-    <section className="workspace-panel">
-      <UartConnection />
-      <section className="card run-control-card" aria-label="Run controls">
-        <div className="run-control-heading">
-          <div className="run-control-title">
-            <h2>Run control</h2>
-            <span className="muted run-control-subtitle">System readiness and acquisition status</span>
-          </div>
-          <button
-            className={`run-toggle-button ${runActive ? "is-running" : "primary"}`}
-            disabled={!runActive && (!connected || serialMock || appliedSignature !== thresholdSignature(thresholds, 1.6))}
-            onClick={() => fpgaSerial.setRunActive(!runActive)}
-            aria-pressed={runActive}
-            title={runActive ? "Stop run" : "Start run"}
-          >
-            <span aria-hidden="true">{runActive ? "■" : "▶"}</span>
-            {runActive ? "Stop run" : "Start run"}
+
+  return <section className="workspace-panel">
+    <UartConnection />
+
+    <section className="card" aria-label="Neural event run controls">
+      <div className="row between" style={{ gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <h2 style={{ marginBottom: 4 }}>AD3 comparators · {dataset || "Select a waveform"}</h2>
+          <span className="muted">Neural event detection · 1× playback</span>
+        </div>
+        <div className="actions" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label>Duration (s)
+            <input style={{ width: 86 }} type="number" min={1} max={60} step={1}
+              disabled={busy || running} value={durationS}
+              onChange={(e) => setDurationS(Number(e.target.value))} />
+          </label>
+          <button className={running ? "" : "primary"}
+            disabled={busy || (!running && (!canArm || !valid))}
+            onClick={() => void (running ? stopRun() : startRun("events"))}>
+            {busy ? "Working…" : running ? "■ Stop run" : "▶ Start run"}
           </button>
         </div>
-        <div className="run-readiness" aria-label="System status">
-          <div className={`run-readiness-item ${preview ? "is-ready" : ""}`}>
-            <span className="run-readiness-dot" aria-hidden="true" />
-            <span className="run-readiness-label">Dataset</span>
-            <span className="run-readiness-value" title={preview?.name ?? undefined}>{preview ? preview.name || dataset : "Not loaded"}</span>
-          </div>
-          <div className={`run-readiness-item ${ad3Status === "connected" ? "is-ready" : ad3Status === "failed" ? "is-error" : ""}`}>
-            <span className="run-readiness-dot" aria-hidden="true" />
-            <span className="run-readiness-label">AD3</span>
-            <span className="run-readiness-value">{{ unchecked: "Not checked", checking: "Checking…", connected: "Connected", failed: "Check failed" }[ad3Status]}</span>
-          </div>
-          <div className={`run-readiness-item ${connected && !serialMock ? "is-ready" : ""}`}>
-            <span className="run-readiness-dot" aria-hidden="true" />
-            <span className="run-readiness-label">UART</span>
-            <span className="run-readiness-value">{connected ? serialMock ? "Mock connected" : `${serialPort ?? "Port"} · ${serialBaud ?? "?"} baud` : "Disconnected"}</span>
-          </div>
-          <div className={`run-readiness-item ${fpgaVerified ? "is-ready" : ""}`}>
-            <span className="run-readiness-dot" aria-hidden="true" />
-            <span className="run-readiness-label">FPGA</span>
-            <span className="run-readiness-value">{fpgaVerified ? "Protocol verified" : "Not verified"}</span>
-          </div>
-        </div>
-        {!runActive && appliedSignature !== thresholdSignature(thresholds, 1.6) && (
-          <p className="run-control-note">Apply and acknowledge all eight thresholds to enable Start.</p>
-        )}
-      </section>
-      <section className="card" aria-label="AD3 digital comparator test">
-        <h2>AD3 digital comparator test</h2>
-        <p className="muted">Hardware pulse validation (not yet derived from the selected neural waveform). DIO0–3 = N1–N4; DIO4–7 = P1–P4.</p>
-        <div className="row" style={{ flexWrap: "wrap", gap: 12 }}>
-          <label>Comparator <select value={pulseChannel} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseChannel(Number(e.target.value))}>
-            {Array.from({ length: 8 }, (_, i) => <option key={i} value={i}>{i < 4 ? `N${i + 1}` : `P${i - 3}`} (DIO{i})</option>)}
-          </select></label>
-          <label>Frequency (Hz) <input type="number" min="0.01" max="10000" step="any" value={pulseFrequency} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseFrequency(Number(e.target.value))} /></label>
-          <label>Width (µs) <input type="number" min="0.01" max="1000000" step="any" value={pulseWidth} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseWidth(Number(e.target.value))} /></label>
-          <label>Duration (s) <input type="number" min="0.1" max="60" step="any" value={pulseDuration} disabled={digitalBusy || digitalActive} onChange={(e) => setPulseDuration(Number(e.target.value))} /></label>
-        </div>
-        <div className="actions" style={{ marginTop: 12 }}>
-          <button className="primary" disabled={digitalBusy || digitalActive || !runActive || !Number.isFinite(pulseFrequency) || pulseFrequency <= 0 || !Number.isFinite(pulseWidth) || pulseWidth <= 0 || !Number.isFinite(pulseDuration) || pulseDuration <= 0} onClick={startDigitalPulse}>Start pulses</button>
-          <button disabled={digitalBusy} onClick={stopDigitalPulse}>Stop / reset LOW</button>
-          <button disabled={digitalBusy || scopeBusy || !digitalActive} onClick={capturePulseScope}>{scopeBusy ? "Capturing…" : "Capture scope (CH1)"}</button>
-          <span className="muted">{!digitalStatusKnown ? "Digital output status unknown" : digitalActive ? "Digital output active" : "Digital output idle"}</span>
-        </div>
-        {pulseScope && <div style={{ marginTop: 12 }}>
-          <div className="muted">CH1: {pulseScope.min_v.toFixed(3)}–{pulseScope.max_v.toFixed(3)} V · Pulse width: {pulseScope.pulse_width_us === null ? "not detected" : `${pulseScope.pulse_width_us.toFixed(2)} µs`} · Edges: {pulseScope.edge_count}</div>
-          <svg viewBox="0 0 800 180" role="img" aria-label="Triggered scope waveform" style={{ width: "100%", height: 180, background: "#111827", borderRadius: 6 }}>
-            <polyline fill="none" stroke="#56d4f0" strokeWidth="1.5" points={pulseScope.voltage_v.filter((_, i) => i % 4 === 0).map((v, i, arr) => `${i * 800 / Math.max(1, arr.length - 1)},${165 - (v + 0.5) * 150 / 4.5}`).join(" ")} />
-          </svg>
-          <p className="muted">{pulseScope.note}</p>
-        </div>}
-        {digitalError && <p role="alert" style={{ color: "#d45" }}>{digitalError}</p>}
-      </section>
-      <section className="card">
-        <div className="row between">
-          <h2>Terminal output</h2>
-          <div className="actions">
-            <button onClick={exportLog} disabled={!log.length}>
-              Save text
-            </button>
-            <button onClick={() => window.print()}>Print</button>
-            <button onClick={clearLog}>Clear</button>
-          </div>
-        </div>
-        <div className="terminal" role="log">
-          {!log.length && (
-            <span className="placeholder">No messages received.</span>
-          )}
-          {log.map((x) => (
-            <div key={x.id} className="line">
-              <span className="timestamp">{x.time}</span>
-              <span className={`kind ${x.kind.toLowerCase()}`}>{x.kind}</span>
-              <span className="text">
-                {JSON.stringify(x.text).slice(1, -1)}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
-      <section className="card">
-        <h2>Analog capture · experiment view</h2>
-        <ScopePair variant="experiment" />
-      </section>
+      </div>
+      <p className="muted" style={{ marginTop: 10, marginBottom: 4 }}>
+        {ad3Status === "connected" ? "AD3 connected" : `AD3: ${ad3Status}`}
+        {" · "}{connected && !serialMock ? (serialPort ?? "UART connected") : "UART disconnected"}
+        {" · "}{fpgaVerified ? "FPGA verified" : "FPGA not verified"}
+        {" · "}{running ? (lastMode === "gpio" ? "GPIO debug running" : "Running") : "Idle"}
+      </p>
+      {!canArm && !running && <p className="muted">Connect the FPGA and apply all eight thresholds to start.</p>}
+      <p className="muted" style={{ marginBottom: 0 }}>FPGA GPIO reporting is disabled automatically over UART.</p>
+      {plan && lastMode === "events" && <p className="muted" style={{ marginBottom: 0 }}>
+        CSV peak {plan.source_peak_uv.toFixed(1)} µV · Modeled AFE peak {plan.afe_peak_mv.toFixed(1)} mV · {plan.cycle_duration_ms.toFixed(3)} ms/cycle
+      </p>}
+      {error && <p role="alert" className="error">{error}</p>}
     </section>
-  );
+
+    <details className="card" aria-label="GPIO debug controls">
+      <summary style={{ cursor: "pointer", fontWeight: 600, padding: "2px 0" }}>
+        GPIO debug <span className="muted" style={{ fontWeight: 400 }}>· 0.25× playback</span>
+      </summary>
+      <p className="muted" style={{ marginTop: 12 }}>
+        Enables FPGA GPIO reports over UART for this test only. Uses 0.25× playback.
+      </p>
+      <div className="actions" style={{ gap: 10, flexWrap: "wrap" }}>
+        <button className="primary"
+          disabled={busy || running || !canArm || !valid}
+          onClick={() => void startRun("gpio")}>
+          {busy ? "Working…" : "Start GPIO debug"}
+        </button>
+        <button disabled={busy || !running || lastMode !== "gpio"} onClick={() => void stopRun()}>Stop debug</button>
+        <button disabled={busy || scopeBusy || !output.active || lastMode !== "gpio"}
+          onClick={() => void captureScope()}>
+          {scopeBusy ? "Capturing…" : "Capture CH1"}
+        </button>
+      </div>
+      {plan && lastMode === "gpio" && <div style={{ marginTop: 12 }}>
+        <p className="muted">{plan.expected_edges_per_second.toFixed(0)} expected edges/s · {plan.cycle_duration_ms.toFixed(3)} ms/cycle</p>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", textAlign: "center" }}>
+            <thead><tr><th>Comparator</th>{CHANNELS.map(ch => <th key={ch}>{ch}</th>)}</tr></thead>
+            <tbody>
+              <tr><th>Expected / cycle</th>{CHANNELS.map(ch => <td key={ch}>{plan.expected_edges_per_cycle[ch] ?? 0}</td>)}</tr>
+              <tr><th>FPGA counted</th>{CHANNELS.map(ch => <td key={ch}>{gpioStats?.edges_by_channel?.[ch] ?? "—"}</td>)}</tr>
+            </tbody>
+          </table>
+        </div>
+        {gpioStats && <p className="muted">{gpioStats.gpio_packets} GPIO packets · {gpioStats.total_edges} transitions observed</p>}
+        <GpioComparison referenceStates={plan.reference_states ?? []} observed={gpioTrace}
+          expectedEdges={plan.expected_edges_per_cycle} />
+      </div>}
+      {scope && lastMode === "gpio" && <div style={{ marginTop: 12 }}>
+        <p className="muted">CH1 {scope.min_v.toFixed(3)}–{scope.max_v.toFixed(3)} V · HIGH {scope.pulse_width_us?.toFixed(2) ?? "—"} µs · {scope.edge_count} edges</p>
+        <svg viewBox="0 0 800 180" role="img" aria-label="AD3 digital scope capture"
+          style={{ width: "100%", height: 180, background: "#111827", borderRadius: 6 }}>
+          <polyline fill="none" stroke="#56d4f0" strokeWidth={1.5}
+            points={scope.voltage_v.filter((_, i) => i % 4 === 0).map((v, i, a) =>
+              `${i * 800 / Math.max(1, a.length - 1)},${168 - (v + 0.5) * 150 / 4.5}`).join(" ")} />
+        </svg>
+        <p className="muted">{scope.note}</p>
+      </div>}
+    </details>
+
+    <NeuralEventPanel />
+    <section className="card">
+      <div className="row between"><h2>Terminal output</h2><div className="actions">
+        <button onClick={exportLog} disabled={!log.length}>Save text</button>
+        <button onClick={() => window.print()}>Print</button>
+        <button onClick={clearLog}>Clear</button>
+      </div></div>
+      <div className="terminal" role="log">{!log.length && <span className="placeholder">No messages received.</span>}
+        {log.map(x => <div key={x.id} className="line"><span className="timestamp">{x.time}</span>
+          <span className={`kind ${x.kind.toLowerCase()}`}>{x.kind}</span><span className="text">{x.text}</span></div>)}
+      </div>
+    </section>
+    <section className="card"><h2>Analog capture · experiment view</h2><ScopePair variant="experiment" /></section>
+  </section>;
 }

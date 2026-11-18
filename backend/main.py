@@ -47,29 +47,50 @@ async def bridge(ws: WebSocket):
                     active = message.get('active')
                     if type(active) is not bool:
                         raise ValueError('Run state must be boolean')
-                    if active and serial_manager.pending is not None:
-                        raise ValueError('Wait for threshold updates to finish')
-                    if active and mock:
-                        raise ValueError('Physical run lock requires a real serial connection')
                     if active:
+                        gpio_debug = message.get('gpio_debug', False)
+                        if type(gpio_debug) is not bool:
+                            raise ValueError('gpio_debug must be boolean')
+                        if serial_manager.pending is not None:
+                            raise ValueError('Wait for threshold updates to finish')
+                        if serial_manager.run_active:
+                            raise ValueError('Run is already active')
+                        if mock:
+                            raise ValueError('Physical run lock requires a real serial connection')
+                        try:
+                            # Do not arm or start AD3 until the FPGA ACKs its mode.
+                            await serial_manager.set_gpio_debug(gpio_debug)
+                        except Exception as exc:
+                            await ws.send_json({'type': 'run_error', 'message':
+                                                f'FPGA GPIO mode not confirmed: {exc}'})
+                            continue
                         serial_manager.reset_diagnostics()
                         serial_manager.run_active = True
                         await ws.send_json({'type': 'run_state', 'data': 'running',
-                                            'message': 'Threshold configuration locked'})
+                                            'gpio_debug': gpio_debug,
+                                            'message': ('GPIO debug enabled' if gpio_debug
+                                                        else 'Neural events; GPIO debug disabled')})
                     else:
-                        # Gate incoming GPIO/event messages immediately, then stop AD3.
+                        # Stop AD3 before disabling GPIO telemetry. Never leave the
+                        # waveform running while changing/debugging the serial mode.
                         serial_manager.run_active = False
-                        stop_error = None
+                        await serial_manager.flush_gpio_trace()
+                        await serial_manager.flush_neural_events()
+                        errors = []
                         try:
                             await asyncio.to_thread(ad3_manager.stop)
                         except (RuntimeError, OSError, ValueError) as exc:
-                            stop_error = str(exc)
+                            errors.append(f'AD3 stop failed: {exc}')
+                        try:
+                            await serial_manager.set_gpio_debug(False)
+                        except Exception as exc:
+                            errors.append(f'GPIO debug disable not ACKed: {exc}')
                         await ws.send_json({'type': 'gpio_stats', **serial_manager.diagnostic_counts()})
+                        await ws.send_json({'type': 'neural_stats', **serial_manager.neural_statistics()})
                         await ws.send_json({'type': 'run_state', 'data': 'stopped',
-                                            'message': 'Run stopped; AD3 stopped' if not stop_error else
-                                                       'Run stopped; AD3 shutdown failed: ' + stop_error})
-                        if stop_error:
-                            await ws.send_json({'type': 'error', 'message': 'AD3 shutdown failed: ' + stop_error})
+                                            'message': 'Run stopped' if not errors else '; '.join(errors)})
+                        for error in errors:
+                            await ws.send_json({'type': 'error', 'message': error})
                 elif message.get('type') == 'set_thresholds':
                     voltages = message.get('thresholds')
                     if not isinstance(voltages, list) or len(voltages) != 8 or any(type(v) not in (int, float) for v in voltages):
@@ -86,6 +107,12 @@ async def bridge(ws: WebSocket):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        if serial_manager.owner is ws:
+            serial_manager.run_active = False
+            with suppress(Exception):
+                await asyncio.to_thread(ad3_manager.stop)
+            with suppress(Exception):
+                await serial_manager.set_gpio_debug(False)
         await serial_manager.disconnect(ws)
 
 # Waveform/oscilloscope milestone (independent of the FPGA serial bridge).
@@ -167,6 +194,110 @@ def ad3_digital_pulse(req: DigitalPulseRequest):
         return ad3_manager.start('pulse', **req.model_dump())
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+
+# Dataset-driven comparator simulation. Thresholds arrive in DAC/React order:
+# P1..P4, N1..N4; DIO order inside waveforms.py is N1..N4, P1..P4.
+# Playback speed 1.0 preserves Kenny's recorded 5 ms neural waveform duration.
+# GPIO debug is a *user declaration about the programmed FPGA bitstream*;
+# we cannot introspect ENABLE_GPIO_DEBUG over the current UART protocol.
+class ComparatorDatasetRequest(BaseModel):
+    dataset: str = Field(min_length=1, max_length=60)
+    thresholds_mv: list[float] = Field(min_length=8, max_length=8)
+    playback_speed: float = Field(default=1.0, ge=0.01, le=1, allow_inf_nan=False)
+    gpio_debug_enabled: bool = False  # FPGA runtime mode is set by UART before playback
+    duration_s: float = Field(default=10, ge=1, le=60, allow_inf_nan=False)
+
+
+def _prepare_comparator_dataset(req: ComparatorDatasetRequest):
+    from waveforms import build_comparator_pattern, DEFAULT_AFE_GAIN_VV
+    from math import isfinite
+
+    names = ('P1', 'P2', 'P3', 'P4', 'N1', 'N2', 'N3', 'N4')
+    if any(not isfinite(v) for v in req.thresholds_mv):
+        raise ValueError('All eight thresholds must be finite')
+    thresholds = dict(zip(names, req.thresholds_mv))
+    data = load_dataset(req.dataset)  # Full CSV, never downsampled UI preview
+    cycle_ms = data['duration_ms'] / req.playback_speed
+    plan = build_comparator_pattern(
+        data['amplitude_uv'], cycle_ms, thresholds,
+        afe_gain=DEFAULT_AFE_GAIN_VV, sample_count=1024, bias_v=1.6,
+    )
+    edge_rate = sum(plan['expected_edges_per_cycle'].values()) * 1000.0 / cycle_ms
+    return data, plan, thresholds, cycle_ms, edge_rate
+
+
+def _reference_comparator_states(words):
+    """Transition-compressed reference, one time-ordered FPGA/DIO mask per state."""
+    return ([{'sample_index': 0, 'mask': words[0]}] +
+            [{'sample_index': i, 'mask': state}
+             for i, state in enumerate(words[1:], start=1)
+             if state != words[i - 1]])
+
+
+@app.post('/api/ad3/digital/comparators/preview')
+def preview_comparator_dataset(req: ComparatorDatasetRequest):
+    try:
+        data, plan, _, cycle_ms, edge_rate = _prepare_comparator_dataset(req)
+        return {
+            'dataset': data['name'], 'source_duration_ms': data['duration_ms'],
+            'cycle_duration_ms': cycle_ms, 'sample_count': plan['sample_count'],
+            'sample_interval_us': cycle_ms * 1000 / plan['sample_count'],
+            'playback_speed': req.playback_speed,
+            'gpio_debug_enabled': req.gpio_debug_enabled,
+            'afe_peak_mv': plan['afe_peak_mv'],
+            'source_peak_uv': plan['source_peak_uv'],
+            'afe_gain': plan['afe_gain'],
+            'expected_edges_per_cycle': plan['expected_edges_per_cycle'],
+            'reference_states': _reference_comparator_states(plan['words']),
+            'expected_edges_per_second': edge_rate,
+            'signal_range_mv': plan['signal_range_mv'],
+            'warning': ('Predicted GPIO diagnostic throughput exceeds the '
+                        'conservative 2000 edges/s limit at 115200 baud. '
+                        'Use the 0.25x GPIO debug mode or reduce playback speed.'
+                        if req.gpio_debug_enabled and edge_rate > 2000 else None),
+        }
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post('/api/ad3/digital/comparators')
+def start_comparator_dataset(req: ComparatorDatasetRequest):
+    try:
+        # The React Run/Stop state must already be active, so the UART reader
+        # records events from the moment digital outputs begin toggling.
+        if not serial_manager.run_active or serial_manager.mock or not serial_manager.device:
+            raise ValueError('Connect physical FPGA UART and click Start run first')
+        if serial_manager.gpio_debug_enabled is not req.gpio_debug_enabled:
+            raise ValueError('FPGA GPIO reporting mode not confirmed by UART; start a new Run')
+        data, plan, thresholds, cycle_ms, edge_rate = _prepare_comparator_dataset(req)
+        if req.gpio_debug_enabled and edge_rate > 2000:
+            raise ValueError(
+                f'Predicted {edge_rate:.0f} transitions/s exceeds safe 115200-baud '
+                'GPIO diagnostic capacity (~2000/s). Use 0.25x GPIO debug mode '
+                'or reduce playback speed.'
+            )
+        if ad3_manager.status().get('active'):
+            raise ValueError('AD3 output already active; stop it before starting a dataset')
+        result = ad3_manager.start(
+            'comparators', sample_values_uv=data['amplitude_uv'],
+            duration_ms=cycle_ms, thresholds_mv=thresholds,
+            afe_gain=plan['afe_gain'], sample_count=1024,
+            bias_v=1.6, duration_s=req.duration_s,
+        )
+        return {**result, 'dataset': data['name'],
+                'afe_gain': plan['afe_gain'],
+                'afe_peak_mv': plan['afe_peak_mv'],
+                'source_peak_uv': plan['source_peak_uv'],
+                'source_duration_ms': data['duration_ms'],
+                'playback_speed': req.playback_speed,
+                'gpio_debug_enabled': req.gpio_debug_enabled,
+                'reference_states': _reference_comparator_states(plan['words']),
+                'warning': None,
+                'expected_edges_per_second': edge_rate,
+                'sample_interval_us': result['cycle_duration_ms'] * 1000 / result['sample_count']}
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 @app.post('/api/ad3/digital/scope')
 def ad3_digital_scope():
