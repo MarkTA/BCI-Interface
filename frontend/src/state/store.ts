@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type Step = "setup" | "dataset" | "afe" | "comparators" | "results";
+export type Step = "setup" | "dataset" | "afe" | "comparators" | "results" | "run";
 export type Waveform = {
   name: string;
   time_ms: number[];
@@ -78,6 +78,9 @@ type Preferences = {
   thresholdsMv: number[];
   biasV: number;
   comparatorMode: "physical" | "simulated";
+  // Physical wiring selection, distinct from the legacy comparator config.
+  signalSource: "ad3" | "pcb";
+  setSignalSource: (source: "ad3" | "pcb") => void;
   setThreshold: (index: number, value: number) => void;
   setComparatorMode: (mode: "physical" | "simulated") => void;
   setBias: (value: number) => void;
@@ -108,6 +111,8 @@ export const useConfig = create<Preferences>()(
       thresholdsMv: [5, 10, 20, 40, -5, -10, -20, -40],
       biasV: 1.6,
       comparatorMode: "simulated",
+      signalSource: "ad3", // Current experiment controller supports AD3 simulation.
+      setSignalSource: (signalSource) => set({ signalSource }),
       setThreshold: (i, value) =>
         set((s) => ({
           thresholdsMv: s.thresholdsMv.map((x, j) => (i === j ? value : x)),
@@ -127,6 +132,7 @@ export const useConfig = create<Preferences>()(
         thresholdsMv: s.thresholdsMv,
         biasV: s.biasV,
         comparatorMode: s.comparatorMode,
+        signalSource: s.signalSource,
         scopeNotes: s.scopeNotes,
         gainDescription: s.gainDescription,
         gainOption: s.gainOption,
@@ -172,6 +178,12 @@ export type NeuralEvent = {
   flags: NeuralFlags;
   raw_hex: string;
 };
+/** Finalized run IDs originate from the backend, not from frontend timers. */
+export type FinishedRecording = {
+  run_id: string;
+  recording_status: string | null;
+  mode: "events" | "gpio";
+};
 export type NeuralStats = {
   received: number;
   timeouts: number;
@@ -198,6 +210,11 @@ type Runtime = {
   setNeuralStats: (stats: NeuralStats) => void;
   clearNeuralEvents: () => void;
   runActive: boolean;
+  activeRecordingId: string | null;
+  activeRecordingMode: "events" | "gpio" | null;
+  lastFinishedRecording: FinishedRecording | null;
+  recordingStarted: (runId: string | null, mode: "events" | "gpio") => void;
+  recordingStopped: (runId: string | null, status: string | null) => void;
   setRunActive: (active: boolean) => void;
   serialConnected: boolean;
   serialPort: string | null;
@@ -218,6 +235,14 @@ type Runtime = {
   clearThresholdAcks: () => void;
   appliedSignature: string | null;
   setAppliedSignature: (signature: string | null) => void;
+  // UI-visible progress shared across the detailed and compact threshold controls.
+  // This is transient hardware state and must not be persisted.
+  thresholdSendStatus: "idle" | "sending" | "success" | "error";
+  thresholdSendMessage: string;
+  setThresholdSendState: (
+    status: Runtime["thresholdSendStatus"],
+    message: string,
+  ) => void;
 };
 let nextEntryId = 0;
 export const useRuntime = create<Runtime>((set) => ({
@@ -244,6 +269,19 @@ export const useRuntime = create<Runtime>((set) => ({
   setNeuralStats: (neuralStats) => set({ neuralStats }),
   clearNeuralEvents: () => set({ neuralEvents: [], neuralStats: null }),
   runActive: false,
+  activeRecordingId: null,
+  activeRecordingMode: null,
+  lastFinishedRecording: null,
+  recordingStarted: (runId, mode) => set({
+    activeRecordingId: runId, activeRecordingMode: mode,
+  }),
+  recordingStopped: (runId, status) => set((state) => ({
+    lastFinishedRecording: runId && state.activeRecordingId === runId && state.activeRecordingMode
+      ? { run_id: runId, recording_status: status, mode: state.activeRecordingMode }
+      : state.lastFinishedRecording,
+    activeRecordingId: null,
+    activeRecordingMode: null,
+  })),
   setRunActive: (runActive) => set({ runActive }),
   serialConnected: false,
   serialPort: null,
@@ -260,7 +298,7 @@ export const useRuntime = create<Runtime>((set) => ({
         serialConnected && !details?.mock ? (details?.baud ?? null) : null,
       serialMock: serialConnected && !!details?.mock,
       ...(!serialConnected
-        ? { runActive: false, gpioStats: null, gpioTrace: [], neuralEvents: [], neuralStats: null, fpgaVerified: false, thresholdAcks: {}, appliedSignature: null }
+        ? { runActive: false, activeRecordingId: null, activeRecordingMode: null, gpioStats: null, gpioTrace: [], neuralEvents: [], neuralStats: null, fpgaVerified: false, thresholdAcks: {}, appliedSignature: null, thresholdSendStatus: "idle", thresholdSendMessage: "" }
         : {}),
     }),
   log: [],
@@ -287,6 +325,10 @@ export const useRuntime = create<Runtime>((set) => ({
   clearThresholdAcks: () => set({ thresholdAcks: {}, appliedSignature: null }),
   appliedSignature: null,
   setAppliedSignature: (appliedSignature) => set({ appliedSignature }),
+  thresholdSendStatus: "idle",
+  thresholdSendMessage: "",
+  setThresholdSendState: (thresholdSendStatus, thresholdSendMessage) =>
+    set({ thresholdSendStatus, thresholdSendMessage }),
 }));
 export const thresholdSignature = (thresholds: number[], bias: number) =>
   JSON.stringify({ thresholds, bias });

@@ -59,20 +59,9 @@ export default function Ad3Connection() {
         : "Not Tested";
 
   return (
-    <section className="card ad3-connection">
-      <div className="row between">
-        <h2>Analog Discovery 3 Connection</h2>
-        <span className={ready ? "badge online" : "badge"} role="status">
-          {statusText}
-        </span>
-      </div>
-
-      <div className="ad3-connection__toolbar">
-        <div className="ad3-connection__description">
-          Verify that the WaveForms SDK can open the AD3 and complete a short
-          oscilloscope acquisition without generating a signal.
-        </div>
-
+    <section className="card input-card">
+      <div className="input__toolbar">
+        <h2>Analog Discovery SDK:</h2>
         <button
           type="button"
           className="primary"
@@ -85,6 +74,10 @@ export default function Ad3Connection() {
               ? "Retest Connection"
               : "Test Connection"}
         </button>
+        <div className="spacer"/>
+        <span className={ready ? "badge online" : "badge"} role="status">
+          {statusText}
+        </span>
       </div>
 
       {message && (

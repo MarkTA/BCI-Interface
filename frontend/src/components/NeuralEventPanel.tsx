@@ -8,7 +8,9 @@ const flagNames: { key: keyof NeuralFlags; label: string }[] = [
   { key: "invalid_sequence", label: "Invalid sequence" },
 ];
 
-export default function NeuralEventPanel() {
+// In the Results accordion, omit the standalone card/title so the existing
+// accordion heading remains the single section heading.
+export default function NeuralEventPanel({ embedded = false }: { embedded?: boolean }) {
   const events = useRuntime((s) => s.neuralEvents);
   const stats = useRuntime((s) => s.neuralStats);
   const runActive = useRuntime((s) => s.runActive);
@@ -16,9 +18,9 @@ export default function NeuralEventPanel() {
   const [showRaw, setShowRaw] = useState(false);
   const recent = events.slice(-30).reverse();
 
-  return <section className="card" aria-label="Decoded FPGA neural events">
+  return <section className={embedded ? undefined : "card"} aria-label="Decoded FPGA neural events">
     <div className="row between" style={{ flexWrap: "wrap", gap: 12 }}>
-      <h2>Neural events · FPGA decoded</h2>
+      {embedded ? <span className="muted">FPGA decoded events</span> : <h2>Neural events · FPGA decoded</h2>}
       <div className="actions">
         <button type="button" onClick={() => setShowRaw((value) => !value)}>
           {showRaw ? "Hide raw hex" : "Show raw hex"}

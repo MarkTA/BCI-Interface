@@ -15,14 +15,14 @@ const switchNotes: ImageNote[] = [
   {
     id: "swOn",
     type: "text",
-    text: "ON",
+    text: "OFF",
     label: { x: 0.365, y: 0.425 },
     textColor: "#FFF",
   },
   {
     id: "swOff",
     type: "text",
-    text: "OFF",
+    text: "ON",
     label: { x: 0.365, y: 0.62 },
     textColor: "#FFF",
   },

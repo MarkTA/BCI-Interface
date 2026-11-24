@@ -1,4 +1,5 @@
 import type { Capture, GeneratorParams, Waveform } from "./store";
+import type { RecordedRun, ValidateOptions, ValidationReport } from "../services/validationRuns";
 export const BASE = "http://127.0.0.1:8000";
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const r = await fetch(`${BASE}${path}`, options);
@@ -66,6 +67,7 @@ export type ComparatorPreview = {
   warning: string | null;
 };
 export type ComparatorStart = ComparatorPreview & {
+  recording_run_id?: string | null;
   active: boolean;
   mode: string;
   sample_rate_hz: number;
@@ -122,6 +124,42 @@ export const api = {
   digitalScope: () => request<PulseScope>("/api/ad3/digital/scope", { method: "POST" }),
   ports: () => request<{ device: string; description: string }[]>("/api/ports"),
   health: () => request<{ ok: boolean; service: string }>("/api/health"),
+  recordedRuns: () => request<{ runs: RecordedRun[] }>("/api/runs"),
+  recordedRun: (runId: string) =>
+    request<RecordedRun>(`/api/runs/${encodeURIComponent(runId)}`),
+  // A missing validation is normal for historical runs and a newly stopped run.
+  // Other HTTP failures still surface as errors instead of being treated as missing.
+  savedValidation: async (runId: string): Promise<ValidationReport | null> => {
+    const path = `/api/runs/${encodeURIComponent(runId)}/validation`;
+    const response = await fetch(`${BASE}${path}`);
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw new Error(`Could not load validation (HTTP ${response.status})`);
+    }
+    return response.json() as Promise<ValidationReport>;
+  },
+  validateRecordedRun: (runId: string, options: ValidateOptions = {}) =>
+    request<ValidationReport>(`/api/runs/${encodeURIComponent(runId)}/validate`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    }),
+  downloadRecordedRunZip: async (runId: string): Promise<void> => {
+    const response = await fetch(`${BASE}/api/runs/${encodeURIComponent(runId)}/export`);
+    if (!response.ok) throw new Error(`Export failed (HTTP ${response.status})`);
+    const file = await response.blob();
+    const url = URL.createObjectURL(file);
+    try {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `CortexSignals_${runId}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } finally {
+      // Let the browser consume the object URL before releasing it.
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    }
+  },
   ad3Connection: () =>
     request<{
       connected: boolean;

@@ -51,6 +51,9 @@ class FpgaSerialService {
       try {
         const packet = JSON.parse(event.data) as {
           type: string;
+          run_id?: string | null;
+          recording_status?: string | null;
+          gpio_debug?: boolean;
           data?: string;
           message?: string;
           hex?: string;
@@ -86,9 +89,13 @@ class FpgaSerialService {
             pending.resolve();
           }
           if (packet.data === "running") {
+            state.recordingStarted(packet.run_id ?? null, packet.gpio_debug ? "gpio" : "events");
             state.setGpioStats(null);
             state.clearGpioTrace();
             state.clearNeuralEvents();
+          }
+          if (packet.data === "stopped") {
+            state.recordingStopped(packet.run_id ?? null, packet.recording_status ?? null);
           }
           state.setRunActive(packet.data === "running");
           state.addLog("INFO", packet.message ?? `Run state: ${packet.data}`);
@@ -236,9 +243,9 @@ class FpgaSerialService {
         new Error("Disable mock mode to verify FPGA acknowledgments"),
       );
     }
-    if (this.pendingThreshold) {
+    if (this.pendingThreshold || this.pendingRun) {
       return Promise.reject(
-        new Error("A threshold request is already in progress"),
+        new Error("Finish the current threshold update or FPGA run setup first"),
       );
     }
     if (

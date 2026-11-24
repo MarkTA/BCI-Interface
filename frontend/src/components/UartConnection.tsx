@@ -15,7 +15,7 @@ export default function UartConnection() {
   const status = useRuntime((s) => s.serialStatus);
   const serialPort = useRuntime((s) => s.serialPort);
   const serialBaud = useRuntime((s) => s.serialBaud);
-  const fpgaVerified = useRuntime((s) => s.fpgaVerified);
+  const serialMock = useRuntime((s) => s.serialMock);
 
   const [port, setPort] = useState("");
   const [baud, setBaud] = useState(115200);
@@ -47,19 +47,8 @@ export default function UartConnection() {
 
   return (
     <section className="card fpga-connection">
-      <div className="row between">
-        <h2>UART FPGA Connection</h2>
-
-        <span className={fpgaVerified ? "badge online" : "badge"}>
-          {fpgaVerified
-            ? "FPGA protocol verified"
-            : connected
-              ? "Connected · Not verified"
-              : "Disconnected"}
-        </span>
-      </div>
-
-      <div className="fpga-connection__toolbar">
+      <div className="input__toolbar">
+        <h2>UART:</h2>
         <button
           type="button"
           className="refresh-button"
@@ -70,28 +59,35 @@ export default function UartConnection() {
         >
           ↻
         </button>
-        <select
-          aria-label="Serial port"
-          title="Serial port"
-          value={port}
-          disabled={busy}
-          onChange={(e) => setPort(e.target.value)}
-        >
-          {!ports.data?.length && (
-            <option value="">No COM ports detected</option>
-          )}
+        <div className="input-container">
+          <label htmlFor="serial-port">Serial Port</label>
+          <select
+            aria-label="Serial port"
+            title="Serial port"
+            id="serial-port"
+            value={port}
+            disabled={busy}
+            onChange={(e) => setPort(e.target.value)}
+          >
+            {!ports.data?.length && (
+              <option value="">No COM ports detected</option>
+            )}
 
-          {ports.data?.map((p) => (
-            <option key={p.device} value={p.device}>
-              {p.device} — {p.description}
-            </option>
-          ))}
-        </select>
-
+            {ports.data?.map((p) => (
+              <option key={p.device} value={p.device}>
+                {p.description}
+              </option>
+            ))}
+          </select>
+        
+        </div>
+        <div className="input-container">
+          <label htmlFor="baud-rate">Baud rate</label>
         <select
           aria-label="Baud rate"
           title="Baud rate"
           value={baud}
+          id="baud-rate"
           disabled={busy}
           onChange={(e) => setBaud(Number(e.target.value))}
         >
@@ -99,6 +95,7 @@ export default function UartConnection() {
           <option value={921600}>921600</option>
           <option value={9600}>9600</option>
         </select>
+        </div>
 
         <button
           type="button"
@@ -108,6 +105,19 @@ export default function UartConnection() {
         >
           {busy ? "Disconnect" : "Connect"}
         </button>
+        <div className="spacer"/>
+
+        <span
+          className={connected && !serialMock ? "badge online" : "badge"}
+          role="status"
+          title="COM-port connection only. FPGA protocol responses are tracked separately."
+        >
+          {connected
+            ? serialMock
+              ? "Mock connected"
+              : "COM port open"
+            : "Disconnected"}
+        </span>
       </div>
 
       {ports.isError && (

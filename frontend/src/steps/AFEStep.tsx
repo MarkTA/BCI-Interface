@@ -25,21 +25,21 @@ export default function AFEStep() {
     <section className="workspace-panel">
       <Ad3Connection />
       <Accordion
-        defaultOpenId="capture"
+        defaultOpenId="gain"
         sections={[
-          {
-            id: "wavegen-guide",
-            title: "AD3 Setup",
-            content: <WaveGenGuide />,
-          },
           {
             id: "gain",
             title: "Gain Configuration",
             content: <DipSwitch />,
           },
           {
+            id: "wavegen-guide",
+            title: "AD3 to PCB Wave Generator Guide",
+            content: <WaveGenGuide />,
+          },
+          {
             id: "scope-guide",
-            title: "Scope Test Points",
+            title: "Scope Test Point Guide",
             content: <ScopeGuide />,
           },
           {

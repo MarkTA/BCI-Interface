@@ -1,5 +1,6 @@
 """BCI USB serial bridge: FastAPI/WebSocket <-> 3.3 V USB-UART <-> FPGA."""
 import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 
@@ -16,6 +17,7 @@ def ports():
     return [{"device": p.device, "description": p.description} for p in list_ports.comports()]
 
 from serial_manager import serial_manager
+from experiment_recording import experiment_recorder
 
 @app.websocket('/ws')
 async def bridge(ws: WebSocket):
@@ -27,7 +29,13 @@ async def bridge(ws: WebSocket):
         if baud not in (9600, 115200, 921600):
             raise ValueError('Unsupported baud rate')
         async def emit(packet):
-            await ws.send_json(packet)
+            try:
+                await ws.send_json(packet)
+            except Exception as exc:
+                # WebSocket may close while FPGA is streaming or during a
+                # last GPIO ACK. Stop the serial reader without an unobserved
+                # background task exception.
+                raise ConnectionError('WebSocket output is closed') from exc
         await serial_manager.connect(ws, port, baud, mock, emit)
     except (serial.SerialException, ValueError, RuntimeError, OSError) as exc:
         await ws.send_json({'type': 'error', 'message': str(exc)})
@@ -55,39 +63,67 @@ async def bridge(ws: WebSocket):
                             raise ValueError('Wait for threshold updates to finish')
                         if serial_manager.run_active:
                             raise ValueError('Run is already active')
+                        if ad3_manager.status().get('active'):
+                            raise ValueError('Stop AD3 digital output before arming a synchronized run')
                         if mock:
                             raise ValueError('Physical run lock requires a real serial connection')
                         try:
                             # Do not arm or start AD3 until the FPGA ACKs its mode.
                             await serial_manager.set_gpio_debug(gpio_debug)
+                            await serial_manager.arm_hardware_sync()
                         except Exception as exc:
                             await ws.send_json({'type': 'run_error', 'message':
-                                                f'FPGA GPIO mode not confirmed: {exc}'})
+                                                f'FPGA GPIO/sync arm not confirmed: {exc}'})
+                            continue
+                        try:
+                            run = experiment_recorder.start(
+                                port=port, baud=baud, gpio_debug=gpio_debug)
+                        except (OSError, RuntimeError) as exc:
+                            with suppress(Exception):
+                                await serial_manager.set_gpio_debug(False)
+                            await ws.send_json({'type': 'run_error', 'message':
+                                                f'Cannot start persistent recording: {exc}'})
                             continue
                         serial_manager.reset_diagnostics()
                         serial_manager.run_active = True
                         await ws.send_json({'type': 'run_state', 'data': 'running',
+                                            'run_id': run['run_id'],
                                             'gpio_debug': gpio_debug,
                                             'message': ('GPIO debug enabled' if gpio_debug
                                                         else 'Neural events; GPIO debug disabled')})
                     else:
-                        # Stop AD3 before disabling GPIO telemetry. Never leave the
-                        # waveform running while changing/debugging the serial mode.
-                        serial_manager.run_active = False
-                        await serial_manager.flush_gpio_trace()
-                        await serial_manager.flush_neural_events()
+                        # Stop AD3 first while UART recording is still armed.
+                        # Give the FIFO/UART a short drain window so the last
+                        # transmitted neural packets aren't lost at Stop.
                         errors = []
                         try:
                             await asyncio.to_thread(ad3_manager.stop)
                         except (RuntimeError, OSError, ValueError) as exc:
                             errors.append(f'AD3 stop failed: {exc}')
+                        if serial_manager.run_active:
+                            # Allow the FSM to close its final event (2.5 ms max)
+                            # then request an FPGA counter snapshot, queued behind
+                            # all pending neural UART frames. Keep recording open.
+                            await asyncio.sleep(0.05)
+                            try:
+                                counters = await serial_manager.request_capture_counters()
+                                experiment_recorder.record_capture_counters(counters)
+                                await ws.send_json({'type': 'capture_stats', **counters})
+                            except Exception as exc:
+                                errors.append(f'FPGA capture counters not confirmed: {exc}')
+                        serial_manager.run_active = False
+                        await serial_manager.flush_gpio_trace()
+                        await serial_manager.flush_neural_events()
                         try:
                             await serial_manager.set_gpio_debug(False)
                         except Exception as exc:
                             errors.append(f'GPIO debug disable not ACKed: {exc}')
                         await ws.send_json({'type': 'gpio_stats', **serial_manager.diagnostic_counts()})
                         await ws.send_json({'type': 'neural_stats', **serial_manager.neural_statistics()})
+                        finished = experiment_recorder.finish(reason='stopped', errors=errors)
                         await ws.send_json({'type': 'run_state', 'data': 'stopped',
+                                            'run_id': finished['run_id'] if finished else None,
+                                            'recording_status': finished['status'] if finished else None,
                                             'message': 'Run stopped' if not errors else '; '.join(errors)})
                         for error in errors:
                             await ws.send_json({'type': 'error', 'message': error})
@@ -113,6 +149,9 @@ async def bridge(ws: WebSocket):
                 await asyncio.to_thread(ad3_manager.stop)
             with suppress(Exception):
                 await serial_manager.set_gpio_debug(False)
+            # A closed WebSocket can interrupt an active run. Keep its partial
+            # UART files, but never mark them as a completed capture.
+            experiment_recorder.finish(reason='websocket_disconnected')
         await serial_manager.disconnect(ws)
 
 # Waveform/oscilloscope milestone (independent of the FPGA serial bridge).
@@ -157,6 +196,8 @@ class CaptureRequest(BaseModel):
     awg_peak_v: float = Field(default=1, ge=.01, le=2)
 
 from ad3_manager import ad3_manager
+# Includes AD3 automatic timeout stops (which run in a timer thread).
+ad3_manager.on_comparator_stopped = experiment_recorder.playback_stopped
 
 @app.get('/api/ad3/connection')
 def ad3_connection():
@@ -278,13 +319,65 @@ def start_comparator_dataset(req: ComparatorDatasetRequest):
             )
         if ad3_manager.status().get('active'):
             raise ValueError('AD3 output already active; stop it before starting a dataset')
-        result = ad3_manager.start(
-            'comparators', sample_values_uv=data['amplitude_uv'],
-            duration_ms=cycle_ms, thresholds_mv=thresholds,
-            afe_gain=plan['afe_gain'], sample_count=1024,
-            bias_v=1.6, duration_s=req.duration_s,
-        )
+        # Persist the original CSV and the exact generated AD3 pattern before
+        # playback begins. This preserves inputs even if datasets are edited.
+        # Real WebSocket runs must always have a persistent recorder. Isolated
+        # tests that monkeypatch run_active without a WS owner are unrecorded.
+        recording_id = experiment_recorder.active_run_id
+        if serial_manager.owner is not None and not recording_id:
+            raise RuntimeError('Run recording is unavailable; stop and re-arm the FPGA')
+        if recording_id:
+            from datasets import DATASETS
+            original_csv = (DATASETS / f"{data['name']}.csv").read_bytes()
+            experiment_recorder.begin_playback(
+                configuration={
+                    'dataset': data['name'], 'dataset_samples': data['samples'],
+                    'source_duration_ms': data['duration_ms'],
+                    'source_sample_rate_hz': data['sample_rate_hz'],
+                    'thresholds_mv': thresholds,
+                    'playback_speed': req.playback_speed,
+                    'requested_duration_s': req.duration_s,
+                    'cycle_duration_requested_ms': cycle_ms,
+                    'afe_gain_vv': plan['afe_gain'],
+                    'bias_v': plan['bias_v'],
+                    'gpio_debug_enabled': req.gpio_debug_enabled,
+                    'pattern_sample_count': plan['sample_count'],
+                },
+                dataset_bytes=original_csv,
+                comparator_words=bytes(plan['words']),
+            )
+        try:
+            result = ad3_manager.start(
+                'comparators', sample_values_uv=data['amplitude_uv'],
+                duration_ms=cycle_ms, thresholds_mv=thresholds,
+                afe_gain=plan['afe_gain'], sample_count=1024,
+                bias_v=1.6, duration_s=req.duration_s,
+            )
+        except Exception as exc:
+            if recording_id:
+                experiment_recorder.playback_failed(str(exc))
+            raise
+        if recording_id:
+            try:
+                if result['sample_count'] != plan['sample_count']:
+                    from waveforms import build_comparator_pattern
+                    actual = build_comparator_pattern(
+                        data['amplitude_uv'], cycle_ms, thresholds,
+                        afe_gain=plan['afe_gain'],
+                        sample_count=result['sample_count'], bias_v=1.6,
+                    )
+                    experiment_recorder.replace_actual_pattern(bytes(actual['words']))
+                experiment_recorder.playback_started(result)
+            except Exception as exc:
+                # Do not allow playback to continue if its reference data was
+                # not saved successfully; caller's Stop is not guaranteed.
+                try:
+                    ad3_manager.stop()
+                finally:
+                    experiment_recorder.playback_failed(str(exc))
+                raise
         return {**result, 'dataset': data['name'],
+                'recording_run_id': recording_id,
                 'afe_gain': plan['afe_gain'],
                 'afe_peak_mv': plan['afe_peak_mv'],
                 'source_peak_uv': plan['source_peak_uv'],
@@ -349,6 +442,69 @@ from fastapi.staticfiles import StaticFiles
 @app.get('/api/health')
 def health():
     return {'ok': True, 'service': 'bci-interface'}
+
+# Run-history APIs; available without a frontend refactor.
+@app.get('/api/runs')
+def recorded_runs():
+    return {'runs': experiment_recorder.list_runs()}
+
+
+@app.get('/api/runs/{run_id}')
+def recorded_run(run_id: str):
+    try:
+        return experiment_recorder.get_run(run_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail='Run not found')
+
+
+# Offline analysis is explicit: never block UART capture with reference simulation.
+from validation_orchestrator import validate_recorded_run
+from pydantic import BaseModel
+from typing import Any
+
+
+class ValidateRunRequest(BaseModel):
+    alignment: dict[str, Any] | None = None
+    tolerance_us: float = Field(default=100, gt=0, le=1_000_000, allow_inf_nan=False)
+    isolated_reference_indices: list[int] | None = None
+    baseline: dict[str, Any] | None = None
+    sync_latency_clocks: int = Field(default=2, ge=0, le=1000)
+    full_event_capture_verified: bool = False
+    full_event_capture_evidence: str | None = None
+    measured_fpga_transport: dict[str, Any] | None = None
+
+
+@app.post('/api/runs/{run_id}/validate')
+def validate_run(run_id: str, request: ValidateRunRequest):
+    try:
+        return validate_recorded_run(
+            experiment_recorder, run_id, **request.model_dump(), save=True)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail='Run not found') from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get('/api/runs/{run_id}/validation')
+def get_run_validation(run_id: str):
+    try:
+        path = experiment_recorder._path(run_id) / 'validation.json'
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail='Validation not found')
+
+
+@app.get('/api/runs/{run_id}/export')
+def export_recorded_run(run_id: str):
+    try:
+        archive = experiment_recorder.make_archive(run_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail='Run not found')
+    return FileResponse(archive, media_type='application/zip', filename=archive.name)
 
 if getattr(sys, 'frozen', False):
     _static_dir = Path(sys._MEIPASS) / 'frontend-dist'

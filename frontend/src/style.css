@@ -211,7 +211,7 @@ header p {
 .card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  padding: 24px;
+  padding: 16px 0;
   border-radius: var(--radius-lg);
   margin-bottom: 18px;
   box-shadow: 0 9px 30px #0002;
@@ -895,6 +895,51 @@ footer {
 .dip-thumb.is-off {
   top: 41px;
 }
+
+/* Step 6: same gain selector and switch illustration, without the guide text. */
+.gain-controls.gain-controls--compact {
+  padding-top: 12px;
+  width: 200px;
+  min-width: 0;
+  gap: 8px;
+}
+.gain-controls--compact .dip-visual {
+  margin-top: 2px;
+}
+.gain-controls--compact .dip-board {
+  width: 150px;
+  padding: 9px 11px 8px;
+}
+.gain-controls--compact .dip-top {
+  font-size: 14px;
+  margin-bottom: 5px;
+}
+.gain-controls--compact .dip-slots {
+  gap: 7px;
+}
+.gain-controls--compact .dip-unit {
+  gap: 4px;
+}
+.gain-controls--compact .dip-unit strong {
+  font-size: 14px;
+}
+.gain-controls--compact .dip-track {
+  width: 27px;
+  height: 55px;
+  padding: 4px 3px;
+}
+.gain-controls--compact .dip-thumb {
+  width: 22px;
+  height: 22px;
+  left: 3px;
+}
+.gain-controls--compact .dip-thumb.is-on {
+  top: 4px;
+}
+.gain-controls--compact .dip-thumb.is-off {
+  top: 32px;
+}
+
 @media (max-width: 760px) {
   .gain-layout {
     grid-template-columns: 1fr;
@@ -1046,7 +1091,7 @@ footer {
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  padding: 16px 0 28px;
+  padding: 16px 0;
   margin: 0 auto 12px;
   max-width: 800px;
 }
@@ -1279,11 +1324,32 @@ button {
 
 /* Shared FPGA connection component */
 
-.fpga-connection__toolbar {
+.input__toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-top: 16px;
+}
+
+.input__toolbar h2 {
+  margin-right: 18px;
+}
+
+.input-card .hint {
+  margin: 0;
+}
+
+.input__toolbar .input-container {
+  position: relative;
+}
+
+.input__toolbar .input-container label {
+  position: absolute;
+  top:-22px;
+}
+
+.spacer {
+  flex-grow: 1;
 }
 
 .fpga-connection__toolbar select:first-child {
@@ -1429,3 +1495,327 @@ button {
 @media(max-width:900px) { .run-readiness { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media(max-width:540px) { .run-control-title { align-items:flex-start; flex-direction:column; gap:2px; } .run-control-subtitle { font-size:.75rem; } }
 
+
+
+/* Step 6: experiment form — selection/gain on the left, stacked thresholds on the right. */
+.run-config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 290px) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+  margin-top: 18px;
+}
+.run-config-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.run-config-fields > div,
+.run-config-fields select {
+  min-width: 0;
+  width: 100%;
+}
+
+/* Align the compact DIP illustration with the gain dropdown, not its label. */
+.run-config-fields .gain-controls--compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  grid-template-rows: 20px minmax(38px, auto);
+  gap: 5px 12px;
+  align-items: start;
+  width: 100%;
+  padding-top: 0;
+  position: relative;
+}
+.run-config-fields .gain-controls--compact .pcb_instr {
+  position: absolute;
+  font-style:italic;
+  font-size: 12px;
+  top: 70px;
+}
+.run-config-fields .gain-controls--compact label {
+  grid-column: 1;
+  grid-row: 1;
+}
+.run-config-fields .gain-controls--compact select {
+  grid-column: 1;
+  grid-row: 2;
+}
+.run-config-fields .gain-controls--compact .dip-visual {
+  grid-column: 2;
+  grid-row: 2;
+  width: 140px;
+  margin: 0;
+}
+.run-config-fields .gain-controls--compact .dip-board {
+  width: 140px;
+}
+/* Right column: each polarity has its own full-width row of four inputs. */
+.run-config-layout .run-thresholds {
+  min-width: 0;
+  margin: 0;
+  padding: 8px 0 8px 24px;
+  border-left: 1px solid var(--color-border);
+}
+.run-config-layout .run-thresholds h3 {
+  margin: 0 0 14px;
+  font-size: 18px;
+}
+.run-config-layout .run-threshold-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+.run-threshold-group {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border-334b61);
+  border-radius: var(--radius-md);
+  background: var(--surface-0e1a29);
+}
+.run-threshold-group legend {
+  padding: 0 5px;
+  color: var(--text-b9dcff);
+  font-size: 13px;
+  font-weight: 650;
+}
+.run-threshold-inputs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.run-threshold-inputs label,
+.run-threshold-inputs input {
+  min-width: 0;
+}
+.run-config-layout .run-threshold-inputs input {
+  height: 38px;
+  padding: 6px 8px;
+}
+
+/* Step 6: per-input FPGA acknowledgments; preserve the existing form layout. */
+.run-threshold-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.run-threshold-check {
+  color: var(--accent-65c8a6);
+  font-weight: 750;
+}
+.run-threshold-modified {
+  color: var(--accent-dbaa64);
+  font-weight: 750;
+}
+.run-config-layout .run-threshold-inputs input.run-threshold-confirmed {
+  border-color: var(--accent-65c8a6);
+}
+.run-config-layout .run-threshold-inputs input.run-threshold-pending {
+  border-color: var(--accent-dbaa64);
+}
+
+@media (max-width: 700px) {
+  .run-config-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .run-config-layout .run-thresholds { padding-left: 0; border-left: 0; }
+}
+@media (max-width: 430px) {
+  .run-threshold-inputs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+
+/* Step 4 — a single compact UART connection row, optimized for 800px. */
+.fpga-connection {
+  padding-top: 8px;
+  padding-bottom: 14px;
+  margin-bottom: 0;
+}
+.fpga-connection__toolbar {
+  display: grid;
+  grid-template-columns: max-content 26px minmax(0, 1fr) 100px max-content max-content;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+}
+.fpga-connection__toolbar h2 {
+  font-size: 19px;
+  margin: 0 4px 0 0;
+  white-space: nowrap;
+}
+.fpga-connection__toolbar select {
+  min-width: 0;
+  width: 100%;
+  max-width: none;
+  height: 38px;
+  padding: 6px 8px;
+}
+.fpga-connection__toolbar .primary {
+  height: 38px;
+  padding: 6px 10px;
+}
+.fpga-connection__toolbar .refresh-button {
+  width: 26px;
+  padding: 0;
+  font-size: 24px;
+}
+.fpga-connection__toolbar .badge {
+  white-space: nowrap;
+  padding: 7px 9px;
+}
+
+.comparator-thresholds {
+  padding-top: 12px;
+}
+.comparator-thresholds .row.between h2 {
+  margin-bottom: 0;
+}
+.comparator-thresholds__meta {
+  margin: 8px 0 10px;
+  font-size: 13px;
+}
+.comparator-thresholds__table {
+  line-height: 1.25;
+  font-size: 14px;
+}
+.comparator-thresholds__table thead th {
+  padding: 3px 7px 6px;
+  white-space: nowrap;
+}
+.comparator-thresholds__table thead th:first-child {
+  padding-left: 0;
+}
+.comparator-thresholds__table tbody th,
+.comparator-thresholds__table tbody td {
+  height: 36px;
+  vertical-align: middle;
+}
+.comparator-thresholds__input {
+  max-width: 110px;
+  height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--surface-0c1524);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 14px;
+}
+.comparator-thresholds__input:focus-visible {
+  outline: 2px solid var(--accent-55b7ff);
+  outline-offset: 1px;
+}
+
+
+/* FPGA Setup: one-row signal source selection, matching UART and AD3 toolbars. */
+.fpga-signal-source { padding-top: 8px; padding-bottom: 14px; }
+.fpga-signal-source__toolbar { margin-top: 0; }
+.fpga-signal-source__toolbar h2 { font-size: 19px; margin: 0 8px 0 0; white-space: nowrap; }
+.fpga-signal-source__toolbar select {
+  flex: 0 1 340px;
+  min-width: 0;
+  max-width: 340px;
+  height: 38px;
+  padding: 6px 10px;
+}
+.fpga-signal-source__toolbar .badge { white-space: nowrap; }
+
+/* Step 4 terminal: same modal surface and existing terminal colors/buttons. */
+.serial-terminal-modal { width: min(820px, calc(100vw - 32px)); }
+.serial-terminal-modal .terminal { margin-top: 16px; min-height: 280px; max-height: min(56vh, 520px); }
+.serial-terminal-modal__actions { justify-content: flex-end; margin-top: 16px; }
+
+/* Step 6 — persisted validation dashboard (uses existing dark/light tokens). */
+.validation-results-header {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  background: var(--color-surface);
+  margin: 10px 0 12px;
+}
+.validation-run-selector { min-width: 0; }
+.validation-run-selector label { display: block; margin-bottom: 5px; font-size: .86rem; font-weight: 650; }
+.validation-run-selector select { width: 100%; min-width: 0; max-width: 650px; }
+.validation-banner { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-top: 12px; }
+.validation-banner__main { display: flex; gap: 10px; flex: 1 1 280px; flex-wrap: wrap; align-items: center; }
+.validation-banner__detail { font-size: .79rem; color: var(--color-text-muted); }
+.validation-banner p { flex-basis: 100%; margin: 2px 0 0; }
+.validation-status {
+  display: inline-block; padding: 3px 8px; border: 1px solid var(--color-border);
+  border-radius: 999px; font-size: .72rem; font-weight: 700; white-space: nowrap;
+  text-transform: uppercase; letter-spacing: .015em;
+}
+.validation-status--pass { color: var(--text-87e7ba); border-color: var(--accent-65c8a6); }
+.validation-status--fail { color: var(--text-ff8e8e); border-color: var(--text-ff8e8e); }
+.validation-status--unknown { color: var(--text-f5d289); border-color: var(--accent-dbaa64); }
+.validation-section-status { font-size: .73rem; color: var(--color-text-muted); font-weight: normal; }
+.validation-table-wrap { overflow: auto; width: 100%; }
+.validation-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .84rem; }
+.validation-table th, .validation-table td { padding: 9px 10px; border-bottom: 1px solid var(--color-border); vertical-align: top; }
+.validation-table thead th { font-size: .77rem; color: var(--color-text-muted); white-space: nowrap; }
+.validation-table tbody th { font-weight: 650; }
+.validation-table td { font-variant-numeric: tabular-nums; }
+.validation-reason { display: block; color: var(--color-text-muted); font-size: .75rem; margin-top: 5px; max-width: 350px; line-height: 1.4; }
+.validation-counts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.validation-counts > div { display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--surface-0e1a29); padding: 10px; min-width: 0; }
+.validation-counts span { color: var(--color-text-muted); font-size: .77rem; }
+.validation-counts strong { font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+.validation-anchor { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; background: var(--surface-0e1a29); border: 1px solid var(--color-border); border-radius: 8px; padding: 12px; margin: 15px 0; }
+.validation-anchor > div { flex: 1 1 250px; }
+.validation-anchor p { font-size: .78rem; margin: 5px 0 0; }
+.validation-anchor label { font-size: .78rem; }
+.validation-anchor input { display: block; width: 88px; margin-top: 4px; }
+.validation-mismatch { color: var(--text-ff8e8e); font-weight: 700; }
+.validation-unmatched { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.validation-unmatched h4 { margin: 8px 0; }
+.validation-unmatched ol { margin: 0; padding-left: 18px; font-size: .81rem; line-height: 1.75; }
+.validation-log-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; }
+.validation-log-details > div { min-width: 0; }
+.validation-log-details dt { color: var(--color-text-muted); font-size: .75rem; margin-bottom: 4px; }
+.validation-log-details dd { margin: 0; font-size: .85rem; overflow-wrap: anywhere; }
+.validation-alert { padding: 10px 12px; border-left: 3px solid var(--accent-dbaa64); background: var(--surface-0e1a29); margin-top: 14px; font-size: .84rem; }
+.validation-alert ul { padding-left: 18px; margin: 8px 0 2px; }
+.validation-alert li { margin-bottom: 5px; }
+.validation-export p { line-height: 1.5; }
+.validation-export-button { display: inline-flex; align-items: center; border: 1px solid var(--color-primary); border-radius: 6px; color: var(--color-text); background: var(--surface-173e5f); padding: 9px 14px; font-size: .9rem; font-weight: 650; text-decoration: none; }
+.validation-export-button--disabled { cursor: not-allowed; opacity: .5; pointer-events: none; }
+@media(max-width: 760px) {
+  .validation-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .validation-log-details { grid-template-columns: minmax(0,1fr); }
+}
+@media(max-width: 480px) {
+  .validation-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .validation-unmatched { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Step 6: presentation-first results. Detailed engineering evidence stays accessible. */
+.validation-overview { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:15px 18px; border:1px solid var(--color-border); background:var(--surface-0e1a29); border-radius:10px; }
+.validation-overview strong { font-size:1rem; }
+.validation-overview p { margin:6px 0 0; max-width:780px; color:var(--color-text-muted); font-size:.84rem; line-height:1.5; }
+.validation-overview__actions { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+.validation-conclusion { border-left:4px solid var(--accent-dbaa64); background:var(--surface-0e1a29); padding:13px 16px; border-radius:6px; margin-bottom:16px; }
+.validation-conclusion strong { font-size:1.05rem; }
+.validation-conclusion p { font-size:.85rem; line-height:1.45; color:var(--color-text-muted); margin:6px 0 0; }
+.validation-metric-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+.validation-metric-card { border:1px solid var(--color-border); border-radius:10px; padding:15px; background:var(--surface-0e1a29); min-width:0; }
+.validation-metric-card--fail { border-color:var(--text-ff8e8e); }
+.validation-metric-card--pass { border-color:var(--accent-65c8a6); }
+.validation-metric-card__top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; font-weight:650; font-size:.87rem; }
+.validation-metric-card__top .validation-status { font-size:.7rem; white-space:nowrap; }
+.validation-metric-card__value { font-size:1.8rem; font-weight:750; font-variant-numeric:tabular-nums; margin:12px 0 2px; }
+.validation-metric-card__target { font-size:.78rem; color:var(--color-text-muted); }
+.validation-metric-card p { font-size:.78rem; line-height:1.4; color:var(--color-text-muted); margin:10px 0 0; }
+.validation-summary-footnote { font-size:.8rem; color:var(--color-text-muted); margin:16px 0 6px; line-height:1.5; }
+.validation-technical-details { margin:15px 0; font-size:.85rem; }
+.validation-technical-details > summary { cursor:pointer; color:var(--color-text-muted); padding:8px 0; }
+.validation-export-inline { margin-top:12px; border:1px solid var(--color-border); border-radius:10px; padding:12px 18px; }
+.validation-export-inline .validation-export p { font-size:.8rem; margin:6px 0; }
+@media(max-width:1000px) { .validation-metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:580px) { .validation-metric-grid { grid-template-columns:minmax(0,1fr); } }
+
+/* Phase 8: compact evidence checklist; closed until the operator needs details. */
+.validation-verification-checks { display: grid; gap: 0.65rem; margin-top: 0.8rem; }
+.validation-evidence-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.2rem 1rem; padding: 0.65rem 0.8rem; border: 1px solid var(--border, #324457); border-radius: 0.6rem; }
+.validation-evidence-row > span { color: var(--text-muted, #a3b2c8); font-size: 0.85rem; }
+.validation-evidence-row > p { grid-column: 1 / -1; margin: 0; color: var(--text-muted, #a3b2c8); font-size: 0.9rem; }
+@media (max-width: 650px) { .validation-evidence-row { grid-template-columns: 1fr; } }

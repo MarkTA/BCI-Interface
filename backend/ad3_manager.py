@@ -13,6 +13,7 @@ class AD3Manager:
         self._timer = None
         self._generation = 0
         self._status = {'active': False, 'mode': 'idle'}
+        self.on_comparator_stopped = None  # Optional thread-safe run recorder hook
 
     def _cancel_timer(self):
         self._generation += 1
@@ -25,8 +26,10 @@ class AD3Manager:
         if device:
             device.close()
 
-    def stop(self):
+    def stop(self, *, reason="manual"):
         with self._lock:
+            was_comparator_active = (self._status.get("active") and
+                                     self._status.get("mode") == "comparators")
             self._cancel_timer()
             if self._device:
                 try:
@@ -37,13 +40,19 @@ class AD3Manager:
                     raise
             # Leave the SAME AD3 handle open to maintain driven LOW outputs.
             self._status = {'active': False, 'mode': 'idle', 'outputs_low': True}
+            if was_comparator_active and self.on_comparator_stopped:
+                try:
+                    self.on_comparator_stopped(reason)
+                except Exception:
+                    # Recorder failure must never prevent the safe AD3 stop.
+                    log.exception('Run recorder failed during AD3 stop')
             return dict(self._status)
 
     def _timeout(self, generation):
         with self._lock:
             if generation == self._generation:
                 try:
-                    self.stop()
+                    self.stop(reason="auto_timeout")
                 except Exception:
                     log.exception('AD3 digital automatic stop failed')
 

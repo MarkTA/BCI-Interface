@@ -133,8 +133,8 @@ def build_comparator_pattern(
 
 def pack_channel_bits(words: Sequence[int], channel: int) -> bytes:
     """DWF custom pattern: one bit per time sample, bit 0 FIRST in each byte."""
-    if channel not in range(8):
-        raise ValueError("channel must be 0..7")
+    if channel not in range(9):
+        raise ValueError("channel must be 0..8")
     packed = bytearray((len(words) + 7) // 8)
     for index, mask in enumerate(words):
         if mask & (1 << channel):
@@ -208,7 +208,7 @@ class AD3:
         """
         self._call("FDwfDeviceAutoConfigureSet", self.h, C.c_int(0))
         self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
-        for channel in range(8):
+        for channel in range(9):
             ch = C.c_int(channel)
             self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
             self._call("FDwfDigitalOutOutputSet", self.h, ch, C.c_int(0))  # push-pull
@@ -226,7 +226,7 @@ class AD3:
             raise ValueError("mask must be an integer from 0 to 255")
         self._call("FDwfDeviceAutoConfigureSet", self.h, C.c_int(0))
         self._call("FDwfDigitalOutConfigure", self.h, C.c_int(0))
-        for channel in range(8):
+        for channel in range(9):
             ch = C.c_int(channel)
             high = (mask >> channel) & 1
             self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
@@ -320,7 +320,7 @@ class AD3:
 
         capacities = []
         divider_bounds = []
-        for channel in range(8):
+        for channel in range(9):
             ch = C.c_int(channel)
             self._call("FDwfDigitalOutEnableSet", self.h, ch, C.c_int(1))
             self._call("FDwfDigitalOutOutputSet", self.h, ch, C.c_int(0))  # push-pull
@@ -350,18 +350,20 @@ class AD3:
         actual_rate = clock / divider
         actual_duration_ms = 1000 * n / actual_rate
 
-        for channel in range(8):
+        sync_words = [word | (1 << 8) if index == 0 else word
+                      for index, word in enumerate(plan["words"])]
+        for channel in range(9):
             ch = C.c_int(channel)
             self._call("FDwfDigitalOutDividerSet", self.h, ch, C.c_uint(divider))
-            packed = pack_channel_bits(plan["words"], channel)
+            packed = pack_channel_bits(sync_words, channel)
             data = (C.c_ubyte * len(packed)).from_buffer_copy(packed)
             self._call("FDwfDigitalOutDataSet", self.h, ch, data, C.c_uint(n))
 
-        # Exactly one start after all eight buffers are loaded. No digital_low()
+        # Exactly one start after all nine buffers are loaded. No digital_low()
         # or DigitalOutReset() after writing data; either would destroy it.
         self._call("FDwfDigitalOutConfigure", self.h, C.c_int(1))
         print(
-            f"[AD3 comparator] 8 synchronized channels, "
+            f"[AD3 comparator] 8 comparator channels + DIO8 sync, "
             f"{n} samples/cycle, rate={actual_rate:.3f} Hz, "
             f"period={actual_duration_ms:.6f} ms, divider={divider}, "
             f"CSV peak={plan['source_peak_uv']:g} uV, gain={afe_gain:g}x, "
@@ -370,7 +372,9 @@ class AD3:
             flush=True,
         )
         return {
-            "channels": dict(COMPARATOR_DIO),
+            "channels": {**COMPARATOR_DIO, "SYNC": 8},
+            "sync": {"channel": 8, "sample_index": 0, "pulse_samples": 1,
+                     "repeats_each_cycle": True, "marker_decimation": 64},
             "sample_count": n,
             "clock_hz": clock,
             "divider": divider,

@@ -6,9 +6,11 @@ import SetupStep from "./steps/SetupStep";
 import DatasetStep from "./steps/DatasetStep";
 import AFEStep from "./steps/AFEStep";
 import ComparatorStep from "./steps/ComparatorStep";
-import ResultsStep from "./steps/ResultsStep";
+import FPGAStep from "./steps/FPGAStep";
+import RunStep from "./steps/RunStep";
 import StepAboutModal from "./components/StepAboutModal";
 import { STEP_ABOUT } from "./config/stepAbout";
+import { monitorExperimentOutput } from "./services/experimentRun";
 import "./style.css";
 const client = new QueryClient({
   defaultOptions: { queries: { staleTime: 30000, retry: 1 } },
@@ -18,7 +20,8 @@ const STEPS: { key: Step; title: string; short: string }[] = [
   { key: "dataset", title: "Synthetic Brainwaves", short: "Signal Dataset" },
   { key: "afe", title: "Analog Conditioning", short: "Analog Input" },
   { key: "comparators", title: "Neural Events", short: "Thresholds" },
-  { key: "results", title: "Data Output", short: "Digital Output" },
+  { key: "results", title: "FPGA Setup", short: "FPGA Setup" },
+  { key: "run", title: "Run & Results", short: "Run & Results" },
 ];
 function App() {
   const step = useConfig((s) => s.step),
@@ -32,13 +35,18 @@ function App() {
     serialBaud = useRuntime((s) => s.serialBaud),
     serialMock = useRuntime((s) => s.serialMock),
     fpgaVerified = useRuntime((s) => s.fpgaVerified);
+  // Keep AD3 timeout/FPGA disarm synchronization alive across step changes.
+  useEffect(monitorExperimentOutput, []);
+
   const [about, setAbout] = useState(false);
   const [stepAboutOpen, setStepAboutOpen] = useState(false);
-  const progress = [
+  const progress: boolean[] = [
     ["power", "ad3", "ribbon", "uart"].every((k) => check[k]),
     !!preview,
-    false,
-    false,
+    false, // AFE: no completion check yet
+    false, // Comparators: no completion check yet
+    false, // FPGA setup: no completion check yet
+    false, // Run: no completion check yet
   ];
 
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -68,7 +76,9 @@ function App() {
       case "comparators":
         return <ComparatorStep />;
       case "results":
-        return <ResultsStep />;
+        return <FPGAStep />;
+      case "run":
+        return <RunStep />;
     }
   };
   return (
@@ -115,7 +125,7 @@ function App() {
             
             <span className={fpgaVerified ? "status-good" : "status-muted"}>
               <span className="status-dot" aria-hidden="true" />
-              FPGA: {fpgaVerified ? "Protocol verified" : "Not verified"}
+              FPGA: {fpgaVerified ? "Threshold reply received" : "No threshold reply yet"}
             </span>
           </div>
         </div>
@@ -146,7 +156,7 @@ function App() {
             onClick={() => setStep(s.key)}
             aria-current={step === s.key ? "step" : undefined}
           >
-            <span className="step-number">{progress[i] ? "✓" : i + 1}</span>
+            <span className="step-number">{ i + 1}</span>
             <span className="step-label">
               <strong>{s.short}</strong>
               {/* <small>{s.title}</small> */}

@@ -15,16 +15,69 @@ export const GAIN_OPTIONS = [
   { switches: [false, false, false], stage: 19.86, total: 502 },
 ] as const;
 
-export default function DipSwitch() {
+type DipSwitchProps = {
+  compact?: boolean;
+};
+
+export default function DipSwitch({ compact = false }: DipSwitchProps) {
   const gainOption = useConfig((s) => s.gainOption);
   const setGainOption = useConfig((s) => s.setGainOption);
 
   const selectedGain = GAIN_OPTIONS[gainOption] ?? GAIN_OPTIONS[0];
   const switches = selectedGain.switches;
 
+  // Use the same controls and physical switch illustration in both steps.
+  // Compact mode omits the setup instructions already provided in Step 3.
+  const controls = (
+    <div className={`gain-controls${compact ? " gain-controls--compact" : ""}`}>
+      <label htmlFor={compact ? "run-afe-gain" : "afe-gain"}>
+        {compact ? "AFE Gain" : "Total Gain"}
+      </label>
+
+      <select
+        id={compact ? "run-afe-gain" : "afe-gain"}
+        value={gainOption}
+        onChange={(event) => setGainOption(Number(event.target.value))}
+      >
+        {GAIN_OPTIONS.map((option, index) => (
+          <option key={option.total} value={index}>
+            {option.total}×
+          </option>
+        ))}
+      </select>
+      
+      {compact ? <span className="pcb_instr">* match to PCB</span> : ''}
+
+      <div className="dip-visual">
+        <div
+          className="dip-board"
+          role="img"
+          aria-label={switches
+            .map((on, i) => `SW${i + 1} ${on ? "ON" : "OFF"}`)
+            .join(", ")}
+        >
+          <div className="dip-top">ON</div>
+
+          <div className="dip-slots">
+            {switches.map((on, index) => (
+              <div className="dip-unit" key={index}>
+                <div className="dip-track">
+                  <div className={`dip-thumb ${on ? "is-on" : "is-off"}`} />
+                </div>
+
+                <strong>{index + 1}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (compact) return controls;
+
   return (
     <div className="gain-layout">
-      {/* Left: Instructions */}
       <div className="gain-instructions">
         <h2>Amplifier Gain Configuration</h2>
 
@@ -39,46 +92,7 @@ export default function DipSwitch() {
         </p>
       </div>
 
-      {/* Right: Gain selector and DIP illustration */}
-      <div className="gain-controls">
-        <label htmlFor="afe-gain">Total Gain</label>
-
-        <select
-          id="afe-gain"
-          value={gainOption}
-          onChange={(event) => setGainOption(Number(event.target.value))}
-        >
-          {GAIN_OPTIONS.map((option, index) => (
-            <option key={option.total} value={index}>
-              {option.total}×
-            </option>
-          ))}
-        </select>
-
-        <div className="dip-visual">
-          <div
-            className="dip-board"
-            role="img"
-            aria-label={switches
-              .map((on, i) => `SW${i + 1} ${on ? "ON" : "OFF"}`)
-              .join(", ")}
-          >
-            <div className="dip-top">ON</div>
-
-            <div className="dip-slots">
-              {switches.map((on, index) => (
-                <div className="dip-unit" key={index}>
-                  <div className="dip-track">
-                    <div className={`dip-thumb ${on ? "is-on" : "is-off"}`} />
-                  </div>
-
-                  <strong>{index + 1}</strong>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
+      {controls}
     </div>
   );
 }
