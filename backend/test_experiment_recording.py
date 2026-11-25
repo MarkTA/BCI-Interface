@@ -337,6 +337,63 @@ class RestAndWebsocketTests(unittest.TestCase):
                 self.assertEqual(archive.headers['content-type'], 'application/zip')
                 self.assertEqual(client.get('/api/runs/../../etc/passwd').status_code, 404)
 
+    def test_ad_start_failure_finalizes_recording_without_closing_uart(self):
+        from waveforms import DWFError
+        status = {'active': False, 'mode': 'idle'}
+        raw = 'FDwfDeviceOpen: No connected device found FDwfDeviceOpenEx'
+
+        def ad3_start(*args, **kwargs):
+            status.update({'mode': 'recovery_required', 'outputs_low': False, 'error': raw})
+            raise DWFError(raw)
+
+        counters = dict(generated=0, queued=0, transmitted=0, fifo_stall_cycles=0)
+        with patch.object(serial_manager.serial, 'Serial', FakeUART), \
+                patch.object(main.serial_manager, 'arm_hardware_sync', return_value=True), \
+                patch.object(main.serial_manager, 'request_capture_counters', return_value=counters), \
+                patch.object(main.ad3_manager, 'status', side_effect=lambda: status.copy()), \
+                patch.object(main.ad3_manager, 'start', side_effect=ad3_start), \
+                patch.object(main.ad3_manager, 'stop') as stop:
+            with TestClient(main.app) as client, client.websocket_connect('/ws?port=COM6') as ws:
+                self.assertEqual(ws.receive_json()['type'], 'status')
+                ws.send_json({'type': 'set_run_state', 'active': True, 'gpio_debug': False})
+                self.assertEqual(ws.receive_json()['type'], 'gpio_mode')
+                armed = ws.receive_json()
+                self.assertEqual(armed['data'], 'running')
+                run_id = armed['run_id']
+                req = {'dataset': 'positive_then_negative',
+                       'thresholds_mv': [5, 10, 20, 40, -5, -10, -20, -40],
+                       'duration_s': 2, 'playback_speed': 1, 'gpio_debug_enabled': False}
+                result = client.post('/api/ad3/digital/comparators', json=req)
+                self.assertEqual(result.status_code, 400)
+                self.assertIn(raw, result.json()['detail'])
+                ws.send_json({'type': 'set_run_state', 'active': False})
+                for _ in range(10):
+                    packet = ws.receive_json()
+                    if packet['type'] == 'run_state':
+                        break
+                self.assertEqual(packet['data'], 'stopped')
+                self.assertEqual(packet['recording_status'], 'failed')
+                self.assertTrue(any(raw in err for err in packet['errors']))
+                self.assertFalse(main.serial_manager.run_active)
+                self.assertFalse(FakeUART.instances[-1].closed)
+                stop.assert_not_called()  # no repeated attempt to open unplugged AD
+                manifest = client.get(f'/api/runs/{run_id}').json()
+                self.assertEqual(manifest['status'], 'failed')
+                self.assertFalse(manifest['capture']['host_capture_complete'])
+                self.assertEqual(ws.receive_json()['type'], 'error')
+                # Same physical UART session can arm again after AD recovery.
+                status.update({'mode': 'idle', 'error': None})
+                ws.send_json({'type': 'set_run_state', 'active': True, 'gpio_debug': False})
+                self.assertEqual(ws.receive_json()['type'], 'gpio_mode')
+                self.assertEqual(ws.receive_json()['data'], 'running')
+                self.assertEqual(len(FakeUART.instances), 1)
+                ws.send_json({'type': 'set_run_state', 'active': False})
+                for _ in range(10):
+                    packet = ws.receive_json()
+                    if packet['type'] == 'run_state':
+                        break
+                self.assertEqual(packet['data'], 'stopped')
+
     def test_recorder_directory_unwritable_prevents_arming(self):
         with patch.object(serial_manager.serial, 'Serial', FakeUART), \
                 patch.object(self.recorder, 'start', side_effect=OSError('disk full')):

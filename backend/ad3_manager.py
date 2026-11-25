@@ -14,6 +14,7 @@ class AD3Manager:
         self._generation = 0
         self._status = {'active': False, 'mode': 'idle'}
         self.on_comparator_stopped = None  # Optional thread-safe run recorder hook
+        self.on_comparator_failed = None
 
     def _cancel_timer(self):
         self._generation += 1
@@ -26,20 +27,39 @@ class AD3Manager:
         if device:
             device.close()
 
+    def _recover_from_device_error(self, exc, *, comparator_active=False):
+        # A failed SDK call is not evidence that the pins are LOW. Release
+        # the stale handle and end the logical session, but require a fresh
+        # successful stop before another output test is allowed.
+        self._cancel_timer()
+        try:
+            self._close_device()
+        except Exception:
+            log.exception('Failed to close Analog Discovery after SDK error')
+        self._status = {'active': False, 'mode': 'recovery_required',
+                        'outputs_low': False, 'error': str(exc)}
+        if comparator_active and self.on_comparator_failed:
+            try:
+                self.on_comparator_failed(str(exc))
+            except Exception:
+                log.exception('Run recorder failed during AD3 recovery')
+
     def stop(self, *, reason="manual"):
         with self._lock:
             was_comparator_active = (self._status.get("active") and
                                      self._status.get("mode") == "comparators")
             self._cancel_timer()
-            if self._device:
-                try:
+            try:
+                if self._status.get('mode') == 'recovery_required' and not self._device:
+                    self._device = AD3()  # Retry with a fresh SDK handle.
+                if self._device:
                     self._device.stop_digital()
-                except Exception:
-                    log.exception('AD3 digital stop failed')
-                    self._status = {'active': True, 'mode': 'stop_failed'}
-                    raise
+            except Exception as exc:
+                log.exception('AD3 digital stop failed')
+                self._recover_from_device_error(exc, comparator_active=was_comparator_active)
+                raise
             # Leave the SAME AD3 handle open to maintain driven LOW outputs.
-            self._status = {'active': False, 'mode': 'idle', 'outputs_low': True}
+            self._status = {'active': False, 'mode': 'idle', 'outputs_low': self._device is not None}
             if was_comparator_active and self.on_comparator_stopped:
                 try:
                     self.on_comparator_stopped(reason)
@@ -58,13 +78,16 @@ class AD3Manager:
 
     def start(self, mode, **kwargs):
         with self._lock:
-            # Cancel prior test, retaining the same device handle.
+            if self._status.get('mode') == 'recovery_required':
+                raise RuntimeError('Analog Discovery recovery required; retry Stop before starting')
+            was_comparator_active = (self._status.get('active') and
+                                     self._status.get('mode') == 'comparators')
             self._cancel_timer()
-            if self._device:
-                self._device.stop_digital()
-            else:
-                self._device = AD3()
             try:
+                if self._device:
+                    self._device.stop_digital()
+                else:
+                    self._device = AD3()
                 if mode == 'states':
                     info = self._device.digital_states(kwargs['mask'])
                 elif mode == 'pulse':
@@ -89,14 +112,10 @@ class AD3Manager:
                     self._timer.start()
                     self._status['duration_s'] = duration
                 return dict(self._status)
-            except Exception:
+            except Exception as exc:
                 log.exception('AD3 digital start failed')
-                # Attempt to make outputs safe; preserve original error.
-                try:
-                    self._device.stop_digital()
-                except Exception:
-                    log.exception('AD3 cleanup after start failure failed')
-                self._status = {'active': False, 'mode': 'error'}
+                self._recover_from_device_error(
+                    exc, comparator_active=was_comparator_active)
                 raise
 
     def capture_pulse_scope(self, sample_rate_hz=2_000_000.0, count=8192):
@@ -116,6 +135,23 @@ class AD3Manager:
     def status(self):
         with self._lock:
             return dict(self._status)
+
+    def check_readiness(self):
+        """Run the same acquisition check without releasing idle LOW outputs."""
+        with self._lock:
+            if self._status.get('active'):
+                raise RuntimeError('AD3 digital test active; stop it before checking connection')
+            if self._status.get('mode') == 'recovery_required':
+                raise RuntimeError('Analog Discovery recovery required; retry Stop before checking connection')
+            if self._device is None:
+                return self.run_temporary(lambda device: device.check_readiness())
+            try:
+                # Recovery has already stopped the outputs. AnalogIn readiness
+                # uses the existing SDK handle and does not start WaveGen or DIO.
+                return self._device.check_readiness()
+            except Exception as exc:
+                self._recover_from_device_error(exc)
+                raise
 
     def run_temporary(self, fn):
         with self._lock:

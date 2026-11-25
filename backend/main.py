@@ -63,8 +63,11 @@ async def bridge(ws: WebSocket):
                             raise ValueError('Wait for threshold updates to finish')
                         if serial_manager.run_active:
                             raise ValueError('Run is already active')
-                        if ad3_manager.status().get('active'):
-                            raise ValueError('Stop AD3 digital output before arming a synchronized run')
+                        output = ad3_manager.status()
+                        if output.get('active') or output.get('mode') == 'recovery_required':
+                            await ws.send_json({'type': 'run_error', 'message':
+                                                'Stop or recover Analog Discovery output before arming a synchronized run'})
+                            continue
                         if mock:
                             raise ValueError('Physical run lock requires a real serial connection')
                         try:
@@ -97,8 +100,15 @@ async def bridge(ws: WebSocket):
                         # transmitted neural packets aren't lost at Stop.
                         errors = []
                         try:
-                            await asyncio.to_thread(ad3_manager.stop)
-                        except (RuntimeError, OSError, ValueError) as exc:
+                            output = ad3_manager.status()
+                            if output.get('mode') == 'recovery_required':
+                                # A failed SDK session is already released. Finalize
+                                # UART recording without reopening absent hardware;
+                                # explicit REST recovery can retry after reconnect.
+                                errors.append(f"AD3 recovery required: {output.get('error', 'output state unconfirmed')}")
+                            else:
+                                await asyncio.to_thread(ad3_manager.stop)
+                        except Exception as exc:
                             errors.append(f'AD3 stop failed: {exc}')
                         if serial_manager.run_active:
                             # Allow the FSM to close its final event (2.5 ms max)
@@ -124,6 +134,7 @@ async def bridge(ws: WebSocket):
                         await ws.send_json({'type': 'run_state', 'data': 'stopped',
                                             'run_id': finished['run_id'] if finished else None,
                                             'recording_status': finished['status'] if finished else None,
+                                            'errors': errors,
                                             'message': 'Run stopped' if not errors else '; '.join(errors)})
                         for error in errors:
                             await ws.send_json({'type': 'error', 'message': error})
@@ -144,14 +155,19 @@ async def bridge(ws: WebSocket):
         pass
     finally:
         if serial_manager.owner is ws:
+            was_running = serial_manager.run_active
             serial_manager.run_active = False
-            with suppress(Exception):
-                await asyncio.to_thread(ad3_manager.stop)
-            with suppress(Exception):
-                await serial_manager.set_gpio_debug(False)
+            # An idle UART reconnect must not reopen or reset Analog Discovery.
+            if was_running:
+                with suppress(Exception):
+                    await asyncio.to_thread(ad3_manager.stop)
+            if (was_running or serial_manager.gpio_debug_enabled) and not serial_manager.reader_failed:
+                with suppress(Exception):
+                    await serial_manager.set_gpio_debug(False)
             # A closed WebSocket can interrupt an active run. Keep its partial
             # UART files, but never mark them as a completed capture.
-            experiment_recorder.finish(reason='websocket_disconnected')
+            with suppress(Exception):
+                experiment_recorder.finish(reason='websocket_disconnected')
         await serial_manager.disconnect(ws)
 
 # Waveform/oscilloscope milestone (independent of the FPGA serial bridge).
@@ -198,11 +214,12 @@ class CaptureRequest(BaseModel):
 from ad3_manager import ad3_manager
 # Includes AD3 automatic timeout stops (which run in a timer thread).
 ad3_manager.on_comparator_stopped = experiment_recorder.playback_stopped
+ad3_manager.on_comparator_failed = experiment_recorder.playback_failed
 
 @app.get('/api/ad3/connection')
 def ad3_connection():
     try:
-        result = ad3_manager.run_temporary(lambda device: device.check_readiness())
+        result = ad3_manager.check_readiness()
         return {'connected': True, 'ready': True, 'status': 'ready',
                 'message': result['message'], 'warning': None}
     except (RuntimeError, OSError, ValueError) as exc:

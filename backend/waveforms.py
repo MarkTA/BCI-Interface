@@ -491,7 +491,8 @@ class AD3:
                 self._call("FDwfAnalogOutConfigure", self.h, C.c_int(0), C.c_int(0))
             finally:
                 try:
-                    self._call("FDwfDeviceClose", self.h)
+                    self.dwf.FDwfDeviceClose.restype = None
+                    self.dwf.FDwfDeviceClose(self.h)
                 finally:
                     self.h.value = 0
 

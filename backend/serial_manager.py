@@ -41,6 +41,7 @@ class SerialManager:
         self.device = None
         self.owner = None
         self.read_task = None
+        self.reader_failed = False
         self.write_lock = asyncio.Lock()
         self.pending = None
         self.pending_debug = None
@@ -141,6 +142,7 @@ class SerialManager:
         self.gpio_debug_enabled = None
         self.reset_diagnostics()
         self.owner = owner
+        self.reader_failed = False
         self.mock = mock
         self.emit = emit
         self.buffer.clear()
@@ -150,7 +152,6 @@ class SerialManager:
     async def disconnect(self, owner):
         if self.owner is not owner:
             return
-        self.owner = None
         self.run_active = False
         if self.pending and not self.pending.done():
             self.pending.set_exception(ConnectionError('Serial connection closed'))
@@ -173,9 +174,11 @@ class SerialManager:
             self.read_task = None
         if self.device:
             device, self.device = self.device, None
-            await asyncio.to_thread(device.close)
+            with suppress(Exception):
+                await asyncio.to_thread(device.close)
         self.emit = None
         self.buffer.clear()
+        self.owner = None
 
     async def _reader(self):
         try:
@@ -288,15 +291,17 @@ class SerialManager:
         except asyncio.CancelledError:
             raise
         except (serial.SerialException, OSError) as exc:
+            self.reader_failed = True
             if self.run_active:
                 experiment_recorder.mark_incomplete(f"Serial reader failed: {exc}")
-            if self.pending and not self.pending.done():
-                self.pending.set_exception(ConnectionError(str(exc)))
-            if self.pending_debug and not self.pending_debug.done():
-                self.pending_debug.set_exception(ConnectionError(str(exc)))
+            # A USB failure invalidates the physical port even when the WebSocket
+            # itself is still healthy. Notify the UI before rejecting commands.
             if self.emit:
                 with suppress(Exception):
-                    await self.emit({'type': 'error', 'message': f'Serial read failed: {exc}'})
+                    await self.emit({'type': 'serial_fault', 'message': f'Serial read failed: {exc}'})
+            for pending in (self.pending, self.pending_debug, self.pending_sync_arm, self.pending_capture):
+                if pending and not pending.done():
+                    pending.set_exception(ConnectionError(str(exc)))
 
     async def send_text(self, data):
         if self.mock:
