@@ -40,7 +40,7 @@ export function RunSelector({
     <label htmlFor="validation-run">Recorded experiment</label>
     <select id="validation-run" value={selectedRunId ?? ""} onChange={(e) => onChange(e.target.value)}
       disabled={loading || !runs.length || busy}>
-      {!selectedRunId && <option value="">Select an experiment</option>}
+      <option value="">Select a saved experiment</option>
       {selectedRunId && !runs.some((run) => run.run_id === selectedRunId) &&
         <option value={selectedRunId}>{selectedRunId.slice(0, 8)} (loading…)</option>}
       {runs.map((run) => <option key={run.run_id} value={run.run_id}>
@@ -48,7 +48,7 @@ export function RunSelector({
       </option>)}
     </select>
     {error && <p className="error" role="alert">Run history: {error.message}</p>}
-    {!loading && !runs.length && !error && <p className="hint">No recorded runs yet. Complete an experiment to populate this panel.</p>}
+    {!busy && !loading && !runs.length && !error && <p className="hint">No recorded runs yet.</p>}
   </div>;
 }
 
@@ -63,83 +63,93 @@ export function ValidationBanner({
   onAnalyze: (options?: ValidateOptions) => void;
   disabled: boolean;
 }) {
-  const hasAnalysis = !!report;
-  return <div className="validation-overview" role="status" aria-live="polite">
-    <div>
-      <strong>{validating ? "Analyzing recorded experiment…" : loading ? "Loading results…" :
-        hasAnalysis ? "Analysis complete" : manifest ? "Preparing analysis…" : "Run an experiment to see results"}</strong>
-      <p>{hasAnalysis
-        ? "Hardware synchronization and FPGA packet accounting are evaluated automatically. See each result for its verified status."
-        : "Recording and analysis happen automatically when a run finishes."}</p>
-    </div>
-    <div className="validation-overview__actions">
-      {manifest && <span className="muted">{manifest.playback.config?.dataset?.replaceAll("_", " ") ?? "Recorded waveform"}</span>}
-      <button type="button" disabled={disabled || validating || !manifest || manifest.playback.status !== "stopped"}
-        onClick={() => onAnalyze({ alignment: { mode: "event_anchor", reference_index: 0, observed_index: 0 } })}>
-        {validating ? "Analyzing…" : "Reanalyze"}
-      </button>
-    </div>
+  return <div className="results-analysis-status">
+    <span role="status" aria-live="polite">{validating ? "Analyzing…" : loading ? "Loading…" :
+      report ? "Analysis complete" : manifest ? "Not analyzed" : "No recorded experiment"}</span>
+    <button type="button" disabled={disabled || validating || !manifest || manifest.playback.status !== "stopped"}
+      onClick={() => onAnalyze({ alignment: { mode: "event_anchor", reference_index: 0, observed_index: 0 } })}>
+      {validating ? "Analyzing…" : "Reanalyze"}
+    </button>
     {error && <p className="error" role="alert">Analysis could not finish: {error}</p>}
   </div>;
 }
 
 const SIMPLE_LABELS: Record<string, string> = {
-  "Detection F1": "Spike detection",
+  "Detection F1": "Reference F1",
   "Timestamp max |error|": "Absolute timestamp",
   "Time-to-peak max |error|": "Time to peak",
   "Data reduction": "Data reduction",
 };
 function labelFor(row: SummaryRow) {
-  if (row.name.startsWith("Peak ")) return "Peak classification";
-  if (row.name.startsWith("Trough ")) return "Trough classification";
+  if (row.name.startsWith("Peak ")) return row.name.includes("all matches") ? "Peak agreement" : "Peak classification";
+  if (row.name.startsWith("Trough ")) return row.name.includes("all matches") ? "Trough agreement" : "Trough classification";
   return SIMPLE_LABELS[row.name] ?? row.name;
 }
-function summaryReason(row: SummaryRow, report: ValidationReport) {
-  if (row.status === "PASS") return row.name.startsWith("Peak ") || row.name.startsWith("Trough ")
-    ? "Verified for received isolated spikes in AD3 digital simulation; analog PCB not tested."
-    : "Requirement met for this test.";
-  if (row.status === "FAIL") return row.name === "Data reduction"
-    ? "This waveform produces too many events to achieve the 10× bandwidth target. Try a sparser dataset."
-    : "Below required performance";
-  if (row.name === "Detection F1") return report.matching.status === "matched"
-    ? "Hardware timing is aligned; full packet accounting is still required."
-    : "Event correspondence is estimated, not independently synchronized.";
-  if (row.name.startsWith("Peak ") || row.name.startsWith("Trough "))
-    return "Agreement with the reference model; final acceptance requires independently synchronized event matching.";
-  if (row.name.startsWith("Timestamp")) return report.hardware_sync?.status === "ALIGNED"
-    ? "Hardware synchronization is active; additional capture or timing evidence is required."
-    : "Requires a hardware synchronization signal.";
-  if (row.name.startsWith("Time-to-peak")) return report.matching.status === "matched"
-    ? "Hardware-aligned event matching is available; capture evidence is still required."
-    : "Agreement is measured, but event correspondence is estimated.";
-  return "Additional measurement evidence required.";
-}
-
-export function PerformanceSummary({ report }: { report: ValidationReport | null }) {
-  if (!report) return <p className="hint">Your results will appear here automatically after the run.</p>;
+/** Compact overview remains visible while detailed panels are collapsed. */
+export function ResultsOverview({ report }: { report: ValidationReport | null }) {
+  if (!report) return <p className="hint">Key results will appear when analysis is available.</p>;
   const rows = report.validation.performance_summary;
   const failures = rows.filter(r => r.status === "FAIL").length;
   const passes = rows.filter(r => r.status === "PASS").length;
-  const expected = report.matching.counts.expected;
-  const observed = report.matching.counts.observed;
-  const tp = report.matching.counts.tp;
-  return <>
-    <div className="validation-conclusion">
-      <strong>{failures > 0 ? `${failures} requirement${failures > 1 ? "s" : ""} not met` :
-        passes === rows.length ? "All requirements met" : "Digital comparison available — verification incomplete"}</strong>
-      <p><b>Test mode: AD3 digital comparator simulation.</b> Physical PCB performance requires separate calibration.</p>
-      <p>{tp != null
-        ? `${tp.toLocaleString()} matched events out of ${expected.toLocaleString()} expected and ${observed.toLocaleString()} received. ${report.hardware_sync?.status === "ALIGNED" ? "DIO8 hardware synchronization active." : "Matching is exploratory; no independently established timing origin."} ${report.capture_reconciliation?.complete ? "FPGA event counts agree with the PC recording." : "FPGA capture accounting is not yet verified."}`
-        : `${expected.toLocaleString()} expected events; ${observed.toLocaleString()} received. Event correspondence is still being calculated.`}</p>
+  const pending = rows.length - failures - passes;
+  const timing = report.relative_timing;
+  const metrics = report.validation.metrics;
+  const audit = report.verification_audit;
+  const aligned = report.hardware_sync?.status === "ALIGNED";
+  const sharedOrigin = report.matching.alignment.absolute_timing_available;
+  const capture = report.capture_reconciliation?.complete;
+  return <div className="results-overview">
+    <div className="results-verdict">
+      <strong>{passes} passed · {failures} failed · {pending} not verified</strong>
+      <span>Digital comparator simulation · PCB not tested</span>
     </div>
-    <div className="validation-metric-grid">
-      {rows.map(row => <div key={row.name} className={`validation-metric-card validation-metric-card--${row.status.toLowerCase()}`}>
-        <div className="validation-metric-card__top"><span>{labelFor(row)}</span><StatusBadge status={row.status} /></div>
-        <div className="validation-metric-card__value">{formatSummaryValue(row)}</div>
-        <div className="validation-metric-card__target">Target: {row.target}{row.units === "µs" ? " µs" : row.units === "×" ? "×" : ""}</div>
-        <p>{summaryReason(row, report)}</p>
+    <div className="results-metric-grid" aria-label="Performance targets">
+      {rows.map(row => <div key={row.name} className={`results-metric results-metric--${row.status.toLowerCase()}`}>
+        <span className="results-metric__label">{labelFor(row)}</span>
+        <strong>{formatSummaryValue(row)}</strong>
+        <span className="results-metric__target">Target: {row.target}{row.units === "µs" ? " µs" : row.units === "×" ? "×" : ""}</span>
+        <StatusBadge status={row.status} />
       </div>)}
     </div>
+    <div className="results-subheading"><h3>Event comparison</h3><span>{report.matching.status === "matched" ? "Aligned comparison" : report.matching.status === "exploratory" ? "Exploratory alignment" : "Alignment required"}</span></div>
+    <EventCounts matching={report.matching} />
+    <div className="results-inline-stats">
+      <span>Precision <b>{formatPercent(metrics.detection.precision)}</b></span>
+      <span>Recall <b>{formatPercent(metrics.detection.recall)}</b></span>
+      <span>Gross UART <b>{metrics.data_reduction.gross_uart_bit_rate_bps == null ? "—" : `${formatNumber(metrics.data_reduction.gross_uart_bit_rate_bps / 1000, 2)} kbit/s`}</b></span>
+    </div>
+    <div className="results-subheading"><h3>Relative timing</h3><span>Diagnostic only · not absolute timing</span></div>
+    <div className="results-timing-grid">
+      <ResultValue label="Mean interval error (abs.)" value={timingValue(timing?.mean_absolute_interval_error_us, "µs", timing?.consecutive_pairs)} />
+      <ResultValue label="Max interval error (abs.)" value={timingValue(timing?.max_absolute_interval_error_us, "µs", timing?.consecutive_pairs)} />
+      <ResultValue label="Cumulative drift" value={timingValue(timing?.cumulative_relative_drift_us, "µs", timing?.consecutive_pairs)} />
+      <ResultValue label="Clock difference" value={timingValue(timing?.relative_clock_error_ppm, "ppm", timing?.consecutive_pairs)} />
+    </div>
+    <div className="results-evidence" aria-label="Verification evidence">
+      <span>Timing origin <b>{aligned ? "DIO8 aligned" : sharedOrigin ? "Shared origin" : "Not verified"}</b></span>
+      <span>Packet accounting <b>{capture ? "Counts agree" : report.capture_reconciliation?.status === "INCOMPLETE" ? "Incomplete" : "Not verified"}</b></span>
+      <span>Evidence checks <b>{audit ? `${audit.software_verified_count}/${audit.total_checks}` : "—"}</b></span>
+    </div>
+  </div>;
+}
+
+function formatPercent(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value) ? "—" : `${(100 * value).toFixed(2)}%`;
+}
+function timingValue(value: number | null | undefined, unit: string, pairs?: number) {
+  return !pairs || value == null || !Number.isFinite(value) ? "—" : `${formatNumber(value, 3)} ${unit}`;
+}
+function ResultValue({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+export function PerformanceSummary({ report }: { report: ValidationReport | null }) {
+  if (!report) return <p className="hint">No analysis available yet.</p>;
+  const rows = report.validation.performance_summary;
+  return <>
+    <p className="hint">Performance results apply to the recorded digital comparator experiment, not the physical PCB or independently labeled neural detection.</p>
+    <div className="validation-table-wrap"><table className="validation-table"><thead><tr><th>Metric</th><th>Value</th><th>Requirement</th><th>Status</th><th>Explanation</th></tr></thead>
+    <tbody>{rows.map(row => <tr key={row.name}><th scope="row">{row.name}</th><td>{formatSummaryValue(row)}</td><td>{row.target}{row.units === "µs" ? " µs" : row.units === "×" ? "×" : ""}</td><td><StatusBadge status={row.status} /></td><td>{row.reason}</td></tr>)}</tbody></table></div>
     {report.verification_audit &&
       <details className="validation-technical-details">
         <summary>Verification checklist · {report.verification_audit.software_verified_count} of {report.verification_audit.total_checks} evidence checks complete</summary>
@@ -153,23 +163,18 @@ export function PerformanceSummary({ report }: { report: ValidationReport | null
         </div>
       </details>}
     <p className="validation-summary-footnote">Measured agreement is not the same as independently verified hardware accuracy. Missing evidence is labeled <strong>Not verified</strong>, not failed. Absolute timestamp validation also requires a shared timing reference; for synchronized runs, that reference is supplied by DIO8.</p>
-    <details className="validation-technical-details"><summary>Measurement details and exact verification notes</summary>
-      <div className="validation-table-wrap"><table className="validation-table"><thead><tr><th>Metric</th><th>Value</th><th>Requirement</th><th>Explanation</th></tr></thead>
-      <tbody>{rows.map(row => <tr key={row.name}><th scope="row">{row.name}</th><td>{formatSummaryValue(row)}</td>
-        <td>{row.target}{row.units === "µs" ? " µs" : row.units === "×" ? "×" : ""}</td><td>{row.reason}</td></tr>)}</tbody></table></div>
-      <p className="muted">Playback {formatNumber(report.input_snapshots.playback_duration_s_host_observed, 3)} s · AD3 {formatNumber(report.input_snapshots.sample_rate_hz, 0)} Sa/s · Baseline {formatNumber(report.validation.metrics.data_reduction.baseline.continuous_bit_rate_bps, 0)} bit/s</p>
-    </details>
+    <p className="muted">Playback {formatNumber(report.input_snapshots.playback_duration_s_host_observed, 3)} s · AD3 {formatNumber(report.input_snapshots.sample_rate_hz, 0)} Sa/s · Baseline {formatNumber(report.validation.metrics.data_reduction.baseline.continuous_bit_rate_bps, 0)} bit/s</p>
   </>;
 }
 
 function EventCounts({ matching }: { matching: NeuralMatching }) {
   const { expected, observed, tp, fp, fn } = matching.counts;
   return <div className="validation-counts">
-    <div><span>Expected</span><strong>{expected}</strong></div>
-    <div><span>Observed</span><strong>{observed}</strong></div>
-    <div><span>Matched (TP)</span><strong>{tp ?? "—"}</strong></div>
-    <div><span>Extra (FP)</span><strong>{fp ?? "—"}</strong></div>
-    <div><span>Missing (FN)</span><strong>{fn ?? "—"}</strong></div>
+    <div><span>Expected</span><strong>{expected.toLocaleString()}</strong></div>
+    <div><span>Observed</span><strong>{observed.toLocaleString()}</strong></div>
+    <div><span>Matched (TP)</span><strong>{tp?.toLocaleString() ?? "—"}</strong></div>
+    <div><span>Extra (FP)</span><strong>{fp?.toLocaleString() ?? "—"}</strong></div>
+    <div><span>Missing (FN)</span><strong>{fn?.toLocaleString() ?? "—"}</strong></div>
   </div>;
 }
 
@@ -190,7 +195,6 @@ export function ReferenceComparison({ report, onAnalyze, disabled, validating }:
     numRef < matching.counts.expected && numObs < matching.counts.observed;
   const visibleMatches = matching.matches.slice(0, 30);
   return <>
-    <EventCounts matching={matching} />
     {report.relative_timing && report.relative_timing.consecutive_pairs > 0 &&
       <div className="validation-relative-timing">
         <h4>Relative Timing (diagnostic)</h4>
@@ -203,9 +207,10 @@ export function ReferenceComparison({ report, onAnalyze, disabled, validating }:
           <div><dt>Relative clock difference</dt><dd>{formatNumber(report.relative_timing.relative_clock_error_ppm, 3)} ppm</dd></div>
           <div><dt>Max anchored residual</dt><dd>{formatNumber(report.relative_timing.max_absolute_anchored_residual_us, 3)} µs</dd></div>
         </dl>
+        {(report.relative_timing.warnings?.length ?? 0) > 0 && <p className="hint">{report.relative_timing.warnings.join(" · ")}</p>}
       </div>}
 
-    <details className="validation-technical-details"><summary>Advanced: alignment controls and event-by-event diagnostics</summary>
+    <div className="validation-technical-details">
     <p className="hint">Matching window: ±{matching.tolerance_us} µs · Alignment: {matching.alignment.mode.replaceAll("_", " ")}. {matching.alignment.explanation}</p>
     <div className="validation-anchor">
       <div><strong>Exploratory event alignment</strong>
@@ -253,7 +258,7 @@ export function ReferenceComparison({ report, onAnalyze, disabled, validating }:
         {(matching.false_positives.length > 10 || matching.false_negatives.length > 10) &&
           <p className="hint">Showing first 10 per list. Full lists are saved in validation.json.</p>}
       </>}
-    </details>
+    </div>
   </>;
 }
 
@@ -286,14 +291,15 @@ export function ExperimentLog({ manifest, report }: { manifest: RecordedRun | nu
   </>;
 }
 
-export function ExportResults({ manifest, report, busy }: {
+export function ExportResults({ manifest, report, busy, compact = false }: {
   manifest: RecordedRun | null;
   report: ValidationReport | null;
   busy: boolean;
+  compact?: boolean;
 }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  if (!manifest) return <p className="hint">Choose a recorded experiment before exporting.</p>;
+  if (!manifest) return compact ? null : <p className="hint">Choose a recorded experiment before exporting.</p>;
   const blocked = busy || downloading;
   const exportZip = async () => {
     if (blocked) return;
@@ -307,13 +313,13 @@ export function ExportResults({ manifest, report, busy }: {
       setDownloading(false);
     }
   };
-  return <div className="validation-export">
-    <p>Export the complete recording as a ZIP containing the manifest, waveform snapshot, comparator pattern, raw UART, decoded FPGA events, and <code>validation.json</code> when analysis has been saved.</p>
-    <button type="button" className="validation-export-button" disabled={blocked} onClick={() => void exportZip()}>
-      {downloading ? "Preparing download…" : busy ? "Stop the current run to export" : "Export experiment ZIP"}
+  return <div className={`validation-export${compact ? " validation-export--compact" : ""}`}>
+    {!compact && <p>Export the complete recording as a ZIP containing the manifest, waveform snapshot, comparator pattern, raw UART, decoded FPGA events, and <code>validation.json</code> when analysis has been saved.</p>}
+    <button type="button" className="validation-export-button" title="Download saved experiment, raw UART, decoded events, stimulus and available analysis" disabled={blocked} onClick={() => void exportZip()}>
+      {downloading ? "Preparing download…" : busy ? "Export unavailable while busy" : "Export experiment ZIP"}
     </button>
     {downloadError && <p className="error" role="alert">Export: {downloadError}</p>}
-    {!report && <p className="hint">This recording has not been analyzed yet. Export will still contain the captured data.</p>}
-    <p className="muted">Run ID: <code>{manifest.run_id}</code></p>
+    {!compact && !report && <p className="hint">This recording has not been analyzed yet. Export will still contain the captured data.</p>}
+    {!compact && <p className="muted">Run ID: <code>{manifest.run_id}</code></p>}
   </div>;
 }

@@ -8,6 +8,7 @@ import {
   useCanArmExperiment,
   startExperiment,
   stopExperiment,
+  requiresRecovery,
   captureGpioScope,
 } from "../services/experimentRun";
 
@@ -32,6 +33,7 @@ export default function FPGAStep() {
   const error = useExperimentRun((s) => s.error);
   const output = useExperimentRun((s) => s.output);
   const running = runActive || output.active;
+  const recovery = requiresRecovery(output);
   const canArm = useCanArmExperiment();
   const valid = !!dataset && Number.isFinite(durationS) && durationS >= 1 && durationS <= 60;
   const sourceLocked = busy || running;
@@ -75,11 +77,11 @@ export default function FPGAStep() {
             </p>
             <div className="actions" style={{ gap: 10, flexWrap: "wrap" }}>
               <button className="primary"
-                disabled={busy || running || !canArm || !valid || signalSource !== "ad3"}
+                disabled={busy || running || recovery || !canArm || !valid || signalSource !== "ad3"}
                 onClick={() => void startExperiment("gpio")}>
                 {busy ? "Working…" : "Start GPIO debug"}
               </button>
-              <button disabled={busy || !running} onClick={() => void stopExperiment()}>{lastMode === "gpio" ? "Stop debug" : "Stop active run"}</button>
+              <button disabled={busy || (!running && !recovery)} onClick={() => void stopExperiment()}>{recovery ? "Stop / Recover" : lastMode === "gpio" ? "Stop debug" : "Stop active run"}</button>
               <button disabled={busy || scopeBusy || !output.active || lastMode !== "gpio"}
                 onClick={() => void captureGpioScope()}>
                 {scopeBusy ? "Capturing…" : "Capture CH1"}

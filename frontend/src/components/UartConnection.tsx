@@ -17,8 +17,10 @@ export default function UartConnection() {
   const serialBaud = useRuntime((s) => s.serialBaud);
   const serialMock = useRuntime((s) => s.serialMock);
 
-  const [port, setPort] = useState("");
-  const [baud, setBaud] = useState(115200);
+  const lastSerialPort = useRuntime((s) => s.lastSerialPort);
+  const lastSerialBaud = useRuntime((s) => s.lastSerialBaud);
+  const [port, setPort] = useState(lastSerialPort ?? "");
+  const [baud, setBaud] = useState(lastSerialBaud ?? 115200);
 
   // Restore the active connection when navigating between steps.
   useEffect(() => {
@@ -73,6 +75,7 @@ export default function UartConnection() {
               <option value="">No COM ports detected</option>
             )}
 
+            {port && !ports.data?.some(p => p.device === port) && <option value={port}>{port} (not detected)</option>}
             {ports.data?.map((p) => (
               <option key={p.device} value={p.device}>
                 {p.description}

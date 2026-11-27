@@ -1,10 +1,12 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Accordion, type AccordionSection } from "../components/Accordion";
+import type { ReactNode } from "react";
+import "./RunResults.css";
 import DipSwitch from "../components/DipSwitch";
 import NeuralEventPanel from "../components/NeuralEventPanel";
+import StepAboutModal from "../components/StepAboutModal";
 import {
-  RunSelector, ValidationBanner, PerformanceSummary, ReferenceComparison,
+  RunSelector, ValidationBanner, ResultsOverview, PerformanceSummary, ReferenceComparison,
   ExperimentLog, ExportResults,
 } from "../components/RunValidationPanels";
 import { useRunValidation } from "../services/useRunValidation";
@@ -23,6 +25,8 @@ import {
   useCanArmExperiment,
   startExperiment,
   stopExperiment,
+  requiresRecovery,
+  recoverFpga,
 } from "../services/experimentRun";
 
 // Use the same dataset list, selected name, and preview query as Step 2.
@@ -201,6 +205,8 @@ function ThresholdRunControl() {
   const connected = useRuntime((s) => s.serialConnected);
   const mock = useRuntime((s) => s.serialMock);
   const serialPort = useRuntime((s) => s.serialPort);
+  const lastSerialPort = useRuntime((s) => s.lastSerialPort);
+  const serialStatus = useRuntime((s) => s.serialStatus);
   const fpgaVerified = useRuntime((s) => s.fpgaVerified);
   const ad3Status = useRuntime((s) => s.ad3Status);
   const runActive = useRuntime((s) => s.runActive);
@@ -212,17 +218,23 @@ function ThresholdRunControl() {
   const setDurationS = useExperimentRun((s) => s.setDurationS);
   const busy = useExperimentRun((s) => s.busy);
   const error = useExperimentRun((s) => s.error);
+  const errorDetails = useExperimentRun((s) => s.errorDetails);
   const output = useExperimentRun((s) => s.output);
   const lastMode = useExperimentRun((s) => s.lastMode);
   const plan = useExperimentRun((s) => s.plan);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const closeInfo = useCallback(() => setInfoOpen(false), []);
 
   const valid = validThresholds(thresholds);
   const applied = connected && !mock &&
     appliedSignature === thresholdSignature(thresholds, AFE_BIAS_V);
   const sending = sendStatus === "sending";
   const running = runActive || output.active;
+  const recovery = requiresRecovery(output);
   const canArm = useCanArmExperiment();
   const ad3Ready = ad3Status === "connected";
+  const retestAd3 = !running && !recovery && ad3Status === "failed";
+  const reconnectFpga = !running && !recovery && !retestAd3 && !connected && !!lastSerialPort;
   const validRun = signalSource === "ad3" && ad3Ready && !!dataset && valid &&
     Number.isFinite(durationS) && durationS >= 1 && durationS <= 60;
   const status = !connected
@@ -263,84 +275,69 @@ function ThresholdRunControl() {
         </button>
         <button
           type="button"
-          className={running ? "" : "primary"}
-          disabled={busy || (!running && (!canArm || !validRun))}
-          onClick={() => void (running ? stopExperiment() : startExperiment("events"))}
+          className={running || recovery || retestAd3 || reconnectFpga ? "" : "primary"}
+          disabled={busy || serialStatus === "Connecting..." || ad3Status === "checking" || (!running && !recovery && !retestAd3 && !reconnectFpga && (!canArm || !validRun))}
+          onClick={() => void (running || recovery || retestAd3 ? stopExperiment() : reconnectFpga ? recoverFpga() : startExperiment("events"))}
         >
-          {busy ? "Working…" : running ? "■ Stop Run" : "▶ Start Run"}
+          {busy ? (ad3Status === "checking" ? "Validating AD3…" : sending ? "Verifying FPGA…" : reconnectFpga ? "Reconnecting FPGA…" : "Working…") : recovery ? "Stop / Recover" : running ? "■ Stop Run" : retestAd3 ? "Retest AD3" : reconnectFpga ? `Reconnect FPGA (${lastSerialPort})` : "▶ Start Run"}
         </button>
       </div>
-      <div style={{ marginTop: 14 }}>
+      <div className="run-compact-status">
         <span className={applied ? "badge online" : "badge"} role="status">{status}</span>
+        <span>{ad3Ready ? "AD3 ready" : `AD3: ${ad3Status}`}</span>
+        <span>{connected && !mock ? (serialPort ?? "UART ready") : "UART disconnected"}</span>
+        <span>{fpgaVerified ? "FPGA verified" : "FPGA not verified"}</span>
+        <strong>{recovery ? "Recovery required" : running ? (lastMode === "gpio" ? "GPIO debug" : "Running") : "Idle"}</strong>
+        <button type="button" className="run-info-button" onClick={() => setInfoOpen(true)}>ⓘ Run info</button>
       </div>
-      <p className="muted" style={{ marginTop: 12, marginBottom: 4 }}>
-        {ad3Status === "connected" ? "AD3 connected" : `AD3: ${ad3Status}`}
-        {" · "}{connected && !mock ? (serialPort ?? "UART connected") : "UART disconnected"}
-        {" · "}{fpgaVerified ? "FPGA verified" : "FPGA not verified"}
-        {" · "}{running ? (lastMode === "gpio" ? "GPIO debug running" : "Running") : "Idle"}
-      </p>
-      {signalSource === "pcb" && !running && (
-        <p className="hint" role="status">
-          Physical PCB selected in FPGA Setup. This run controller currently supports AD3 digital
-          simulation only; PCB playback will be added during hardware integration.
-        </p>
-      )}
-      {signalSource === "ad3" && !ad3Ready && !running && (
-        <p className="hint" role="status">
-          Test the Analog Discovery connection in Step 3 (Analog Input) before starting a run.
-        </p>
-      )}
-      {!canArm && !running && <p className="hint">Connect the physical FPGA and apply all eight thresholds to start.</p>}
-      {plan && lastMode === "events" && <p className="hint">
-        Last run: {plan.dataset} · CSV peak {plan.source_peak_uv.toFixed(1)} µV ·
-        Modeled AFE peak {plan.afe_peak_mv.toFixed(1)} mV · {plan.cycle_duration_ms.toFixed(3)} ms/cycle
-      </p>}
-      {error && <p role="alert" className="error">{error}</p>}
-      {(sendMessage || (sendStatus === "success" && !applied)) && (
-        <p className={sendStatus === "error" ? "error" : "hint"} role="status">
-          {sendStatus === "success" && !applied
-            ? "Thresholds changed since the last acknowledgment. Send the current values again."
-            : sendMessage}
-        </p>
-      )}
-      <p className="hint" style={{ marginBottom: 0 }}>
-        Threshold acknowledgments confirm FPGA SPI encoding, not physical DAC output.
-        The existing run path drives AD3 digital comparator simulation at 1× playback.
-      </p>
+      {!running && !recovery && signalSource === "pcb" && <p className="hint run-compact-notice" role="status">Physical PCB playback is not yet supported.</p>}
+      {!running && !recovery && signalSource === "ad3" && !ad3Ready && !busy && <p className="hint run-compact-notice" role="status">{retestAd3 ? "Reconnect Analog Discovery and click Retest AD3." : "Test the Analog Discovery connection in Step 3."}</p>}
+      {!running && !recovery && ad3Ready && signalSource === "ad3" && !canArm && <p className="hint run-compact-notice">{reconnectFpga ? `Reconnect the FTDI USB cable, then click Reconnect FPGA (${lastSerialPort}). All eight thresholds will be verified again. If the port changed, select it in Step 4.` : "Connect the physical FPGA and apply all eight thresholds."}</p>}
+      {!connected && !error && serialStatus !== "Disconnected" && !busy && <p className="hint run-compact-notice" role="status">UART: {serialStatus}</p>}
+      {error && <div className="error" role="alert">
+        <div>{error}</div>
+        {errorDetails && <details style={{ marginTop: 6 }}>
+          <summary>Technical details</summary>
+          <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginBottom: 0 }}>{errorDetails}</pre>
+        </details>}
+      </div>}
+      {sendStatus === "error" && sendMessage && <p role="alert" className="error">{sendMessage}</p>}
+      {sendStatus === "success" && !applied && <p className="hint run-compact-notice" role="status">Thresholds changed. Send the current values again.</p>}
+      {infoOpen && <StepAboutModal onClose={closeInfo} config={{
+        buttonLabel: "Run info", title: "Run Information", sections: [
+          { heading: "Thresholds and playback", paragraphs: [
+            "Threshold acknowledgments confirm FPGA SPI encoding, not physical DAC voltage.",
+            "The current run controller drives Analog Discovery digital comparator simulation at 1× playback. Physical PCB playback will be added during hardware integration.",
+            ...(sendMessage ? [sendMessage] : []),
+          ] },
+          { heading: "Last playback", paragraphs: plan && lastMode === "events" ? [
+            `${plan.dataset} · CSV peak ${plan.source_peak_uv.toFixed(1)} µV · Modeled AFE peak ${plan.afe_peak_mv.toFixed(1)} mV · ${plan.cycle_duration_ms.toFixed(3)} ms/cycle`,
+          ] : ["No event playback recorded yet." ] },
+          { heading: "Neural event stream", paragraphs: [
+            "Live AA 02 packets are decoded FPGA events, not comparator GPIO transitions. The preview shows the latest four; View all and CSV include events received by the console for the current or last armed run. The next run clears the live list.",
+            "The FPGA timestamp is a 24-bit microsecond counter and wraps every 16.777216 seconds. Quiet confirmation (500 µs), refractory (100 µs), and timeout (2.5 ms) determine how comparator activity is grouped. A repeating dataset may generate more or fewer than one event per cycle.",
+            "Saved experiment ZIPs and validation results remain the authoritative persistent record, independent of the live list.",
+          ] },
+        ],
+      }} />}
     </>
   );
 }
 
-// Results are backed by immutable Phase 4/5 run records, not by the bounded
-// React neural-event buffer. The event viewer remains live and unchanged.
+// Native details keep every diagnostic independently expandable.
+function ResultDetails({ title, status, children }: { title: string; status?: string; children: ReactNode }) {
+  return <details className="results-detail">
+    <summary><span>{title}</span>{status && <span className="results-detail__status">{status}</span>}</summary>
+    <div className="results-detail__body">{children}</div>
+  </details>;
+}
+
+// Results are backed by immutable run records, independent of the live event viewer.
 export default function RunStep() {
   const results = useRunValidation();
-  const sections: AccordionSection[] = [
-    {
-      id: "performance", title: "Performance Summary",
-      status: results.report && <span className="validation-section-status">{results.report.validation.performance_summary.some(r => r.status === "FAIL") ? "Target missed" : "Review results"}</span>,
-      content: <PerformanceSummary report={results.report} />,
-    },
-    {
-      id: "events", title: "Live Neural Events",
-      content: <NeuralEventPanel embedded />,
-    },
-    {
-      id: "comparison", title: "Event Comparison & Timing",
-      status: results.report && <span className="validation-section-status">{results.report.matching.counts.tp == null ? "Pending" : `${results.report.matching.counts.tp} matched`}</span>,
-      content: <ReferenceComparison report={results.report} onAnalyze={results.analyze}
-        validating={results.validating} disabled={results.busy} />,
-    },
-    {
-      id: "oscilloscope", title: "Oscilloscope",
-      content: <ScopePair variant="experiment" />,
-    },
-    {
-      id: "log", title: "Experiment Log",
-      content: <ExperimentLog manifest={results.manifest} report={results.report} />,
-    },
-  ];
-
+  const report = results.report;
+  const warnings = report ? new Set([...report.warnings, ...report.validation.warnings]).size : 0;
+  const recordingErrors = results.manifest?.errors?.length ?? 0;
   return (
     <section className="workspace-panel">
       <section className="card" aria-labelledby="experiment-config-heading">
@@ -357,24 +354,46 @@ export default function RunStep() {
       <section className="card" aria-labelledby="run-controls-heading">
         <h2 id="run-controls-heading">Run Controls</h2>
         <ThresholdRunControl />
+        <NeuralEventPanel />
       </section>
 
-      <h2>Results</h2>
-      <div className="validation-results-header">
-        <RunSelector runs={results.runs} selectedRunId={results.selectedRunId}
-          onChange={results.setSelectedRunId} loading={results.runsLoading}
-          error={results.runsError} busy={results.validating} />
-        <ValidationBanner report={results.report} manifest={results.manifest}
-          loading={results.loadingReport} validating={results.validating}
-          error={results.analysisError} onAnalyze={results.analyze}
-          disabled={results.busy} />
-        {results.manifestError && <p className="error" role="alert">Run record: {results.manifestError.message}</p>}
-        {results.reportError && !results.validating && results.analysisError && <p className="error" role="alert">Saved analysis: {results.reportError.message}</p>}
-      </div>
-      <Accordion sections={sections} defaultOpenId="performance" />
-      <section className="validation-export-inline" aria-label="Download experiment results">
-        <ExportResults manifest={results.manifest} report={results.report}
-          busy={results.busy || results.manifest?.status === "recording"} />
+      <section className="card results-dashboard" aria-labelledby="results-heading">
+        <div className="results-heading">
+          <h2 id="results-heading">Results</h2>
+          <ExportResults compact manifest={results.manifest} report={report}
+            busy={results.busy || results.validating || results.manifest?.status === "recording"} />
+        </div>
+        <div className="results-toolbar">
+          <RunSelector runs={results.runs} selectedRunId={results.selectedRunId}
+            onChange={results.setSelectedRunId} loading={results.runsLoading}
+            error={results.runsError} busy={results.busy || results.validating} />
+          {results.selectedRunId && <ValidationBanner report={report} manifest={results.manifest}
+            loading={results.loadingReport} validating={results.validating}
+            error={results.analysisError} onAnalyze={results.analyze} disabled={results.busy} />}
+        </div>
+        {!results.selectedRunId ? (
+          <p className="hint results-empty" role="status">{results.busy
+            ? "Experiment in progress — results will appear after the run finishes."
+            : "Run a new experiment or select a saved experiment to view results."}</p>
+        ) : <>
+          {results.manifestError && <p className="error" role="alert">Run record: {results.manifestError.message}</p>}
+          {results.reportError && !results.validating && results.analysisError && <p className="error" role="alert">Saved analysis: {results.reportError.message}</p>}
+          {recordingErrors > 0 && <p className="error" role="alert">{recordingErrors} recording error(s) — see Experiment log below.</p>}
+          {report && results.validating && <p className="hint" role="status">Showing previous saved analysis while reanalysis runs.</p>}
+          <ResultsOverview report={report} />
+          <div className="results-details" key={results.selectedRunId ?? "none"}>
+            <ResultDetails title="Performance & verification details" status={report?.verification_audit ? `${report.verification_audit.software_verified_count}/${report.verification_audit.total_checks} checks` : undefined}>
+              <PerformanceSummary report={report} />
+            </ResultDetails>
+            <ResultDetails title="Event comparison & timing details" status={report?.matching.counts.tp == null ? undefined : `${report.matching.counts.tp.toLocaleString()} matched`}>
+              <ReferenceComparison report={report} onAnalyze={results.analyze} validating={results.validating} disabled={results.busy} />
+            </ResultDetails>
+            <ResultDetails title="Oscilloscope" status="Current capture"><p className="hint">Shows the current scope capture, not a replay of the selected recording.</p><ScopePair variant="experiment" /></ResultDetails>
+            <ResultDetails title="Experiment log & warnings" status={warnings || recordingErrors ? `${warnings} warnings · ${recordingErrors} errors` : undefined}>
+              <ExperimentLog manifest={results.manifest} report={report} />
+            </ResultDetails>
+          </div>
+        </>}
       </section>
     </section>
   );

@@ -2,12 +2,17 @@ import React, { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "../state/api";
 import { useRuntime } from "../state/store";
+import { useExperimentRun, requiresRecovery } from "../services/experimentRun";
 
 type DiagnosticStatus = "ready" | "warning" | "unavailable" | null;
 
 export default function Ad3Connection() {
   const status = useRuntime((s) => s.ad3Status);
   const setStatus = useRuntime((s) => s.setAd3Status);
+  const runActive = useRuntime((s) => s.runActive);
+  const runBusy = useExperimentRun((s) => s.busy);
+  const output = useExperimentRun((s) => s.output);
+  const locked = runActive || runBusy || output.active || requiresRecovery(output);
 
   const [message, setMessage] = useState("");
   const [warning, setWarning] = useState("");
@@ -65,7 +70,7 @@ export default function Ad3Connection() {
         <button
           type="button"
           className="primary"
-          disabled={checking}
+          disabled={checking || locked}
           onClick={() => test.mutate()}
         >
           {checking

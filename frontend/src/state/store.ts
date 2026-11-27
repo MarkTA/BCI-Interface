@@ -205,6 +205,7 @@ type Runtime = {
   appendGpioTrace: (states: GpioTraceState[]) => void;
   clearGpioTrace: () => void;
   neuralEvents: NeuralEvent[];
+  neuralRunId: string | null;
   neuralStats: NeuralStats | null;
   appendNeuralEvents: (events: NeuralEvent[], stats: NeuralStats) => void;
   setNeuralStats: (stats: NeuralStats) => void;
@@ -218,6 +219,8 @@ type Runtime = {
   setRunActive: (active: boolean) => void;
   serialConnected: boolean;
   serialPort: string | null;
+  lastSerialPort: string | null;
+  lastSerialBaud: number | null;
   serialBaud: number | null;
   serialMock: boolean;
   serialStatus: string;
@@ -261,9 +264,12 @@ export const useRuntime = create<Runtime>((set) => ({
   })),
   clearGpioTrace: () => set({ gpioTrace: [] }),
   neuralEvents: [],
+  neuralRunId: null,
   neuralStats: null,
   appendNeuralEvents: (events, stats) => set((s) => ({
-    neuralEvents: [...s.neuralEvents, ...events].slice(-250),
+    // Runs are time-limited; retain all received events for history and CSV.
+    // The next armed run clears this list, not the preview component.
+    neuralEvents: [...s.neuralEvents, ...events],
     neuralStats: stats,
   })),
   setNeuralStats: (neuralStats) => set({ neuralStats }),
@@ -273,7 +279,7 @@ export const useRuntime = create<Runtime>((set) => ({
   activeRecordingMode: null,
   lastFinishedRecording: null,
   recordingStarted: (runId, mode) => set({
-    activeRecordingId: runId, activeRecordingMode: mode,
+    activeRecordingId: runId, activeRecordingMode: mode, neuralRunId: runId,
   }),
   recordingStopped: (runId, status) => set((state) => ({
     lastFinishedRecording: runId && state.activeRecordingId === runId && state.activeRecordingMode
@@ -285,6 +291,8 @@ export const useRuntime = create<Runtime>((set) => ({
   setRunActive: (runActive) => set({ runActive }),
   serialConnected: false,
   serialPort: null,
+  lastSerialPort: null,
+  lastSerialBaud: null,
   serialBaud: null,
   serialMock: false,
   serialStatus: "Disconnected",
@@ -292,13 +300,14 @@ export const useRuntime = create<Runtime>((set) => ({
     set({
       serialConnected,
       serialStatus,
+      ...(details?.port && !details.mock ? { lastSerialPort: details.port, lastSerialBaud: details.baud ?? 115200 } : {}),
       serialPort:
         serialConnected && !details?.mock ? (details?.port ?? null) : null,
       serialBaud:
         serialConnected && !details?.mock ? (details?.baud ?? null) : null,
       serialMock: serialConnected && !!details?.mock,
       ...(!serialConnected
-        ? { runActive: false, activeRecordingId: null, activeRecordingMode: null, gpioStats: null, gpioTrace: [], neuralEvents: [], neuralStats: null, fpgaVerified: false, thresholdAcks: {}, appliedSignature: null, thresholdSendStatus: "idle", thresholdSendMessage: "" }
+        ? { runActive: false, activeRecordingId: null, activeRecordingMode: null, gpioStats: null, gpioTrace: [], fpgaVerified: false, thresholdAcks: {}, appliedSignature: null, thresholdSendStatus: "idle", thresholdSendMessage: "" }
         : {}),
     }),
   log: [],

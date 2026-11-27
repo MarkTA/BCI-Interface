@@ -1,0 +1,24 @@
+.neural-events { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--color-border); min-width: 0; }
+.neural-events__heading { flex-wrap: wrap; gap: 8px; }
+.neural-events__heading h3, .neural-events__heading h2 { margin: 0; }
+.neural-events__heading h3 { font-size: 1rem; font-weight: 650; }
+.neural-events__actions { flex-wrap: wrap; gap: 6px; }
+.neural-events__actions button { padding: 6px 10px; font-size: .78rem; }
+.neural-events__stats { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--color-text-muted); font-size: .78rem; margin: 9px 0 8px; }
+.neural-events__stats strong { color: var(--color-text); }
+.neural-events__table-wrap { width: 100%; overflow: auto; }
+.neural-events__table-wrap--full { max-height: min(52vh, 440px); border: 1px solid var(--color-border); border-radius: 6px; }
+.neural-events__table { width: 100%; min-width: 690px; table-layout: fixed; border-collapse: separate; border-spacing: 0; text-align: left; font-size: .79rem; font-variant-numeric: tabular-nums; }
+.neural-events__table th, .neural-events__table td { box-sizing: border-box; padding: 0 6px; height: 34px; line-height: 33px; border-bottom: 1px solid var(--color-border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.neural-events__table th { color: var(--color-text-muted); font-weight: 650; font-size: .74rem; }
+.neural-events__table-wrap--full th { position: sticky; top: 0; z-index: 1; background: var(--color-surface); }
+.neural-events__table code { font-size: .73rem; white-space: nowrap; }
+.neural-events__table td.neural-events__spacer { padding: 0; border: 0; line-height: 0; }
+.neural-events__empty { margin: 8px 0 0; }
+.modal.neural-events__dialog { width: min(1040px, calc(100vw - 32px)); max-width: calc(100vw - 32px); color: var(--color-text); margin: auto; }
+.neural-events__dialog::backdrop { background: #000b; }
+.neural-events__history-actions { justify-content: flex-end; flex-wrap: wrap; }
+.run-compact-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 10px; font-size: .78rem; color: var(--color-text-muted); }
+.run-compact-status .badge { padding: 4px 8px; }
+.run-compact-status .run-info-button { padding: 4px 9px; font-size: .75rem; }
+.run-compact-notice { margin: 7px 0 0; }

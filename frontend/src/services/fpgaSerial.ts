@@ -6,6 +6,31 @@ export type ThresholdResult = ThresholdAckResult;
 class FpgaSerialService {
   private socket: WebSocket | null = null;
   private connecting = false;
+  private pendingConnection: {
+    resolve: () => void;
+    reject: (reason: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  private finishConnection(error?: string): void {
+    const pending = this.pendingConnection;
+    if (!pending) return;
+    this.pendingConnection = null;
+    clearTimeout(pending.timer);
+    if (error) pending.reject(new Error(error));
+    else pending.resolve();
+  }
+
+  /** Reopen only the previously selected physical port, not the first enumerated port. */
+  reconnect(port: string, baud: number): Promise<void> {
+    if (!port || this.active) return Promise.reject(new Error("Disconnect the old UART session before reconnecting"));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.disconnect("UART connection timed out"), 6000);
+      this.pendingConnection = { resolve, reject, timer };
+      try { this.connect(port, baud, false); }
+      catch (error) { this.disconnect(String(error)); }
+    });
+  }
   private pendingThreshold: {
     id: number;
     resolve: (results: ThresholdResult[]) => void;
@@ -15,6 +40,12 @@ class FpgaSerialService {
   private nextRequestId = 0;
   private pendingRun: {
     resolve: () => void;
+    reject: (reason: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  private pendingStop: {
+    resolve: (errors: string[]) => void;
     reject: (reason: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   } | null = null;
@@ -36,7 +67,7 @@ class FpgaSerialService {
     const ws = new WebSocket(`ws://127.0.0.1:8000/ws?${params}`);
     this.socket = ws;
     this.connecting = true;
-    setSerial(false, "Connecting...");
+    setSerial(false, "Connecting...", { port, baud, mock });
 
     ws.onopen = () => {
       if (this.socket !== ws) return;
@@ -53,6 +84,7 @@ class FpgaSerialService {
           type: string;
           run_id?: string | null;
           recording_status?: string | null;
+          errors?: string[];
           gpio_debug?: boolean;
           data?: string;
           message?: string;
@@ -81,6 +113,7 @@ class FpgaSerialService {
             baud,
             mock,
           });
+          this.finishConnection();
         } else if (packet.type === "run_state") {
           if (packet.data === "running" && this.pendingRun) {
             const pending = this.pendingRun;
@@ -98,6 +131,12 @@ class FpgaSerialService {
             state.recordingStopped(packet.run_id ?? null, packet.recording_status ?? null);
           }
           state.setRunActive(packet.data === "running");
+          if (packet.data === "stopped" && this.pendingStop) {
+            const pending = this.pendingStop;
+            this.pendingStop = null;
+            clearTimeout(pending.timer);
+            pending.resolve(packet.errors ?? []);
+          }
           state.addLog("INFO", packet.message ?? `Run state: ${packet.data}`);
         } else if (packet.type === "run_error") {
           state.addLog("ERROR", packet.message ?? "FPGA run configuration failed");
@@ -145,9 +184,14 @@ class FpgaSerialService {
             "INFO",
             `${ack.name}: ${ack.spi_command} — ENCODED (not written to DAC)`,
           );
+        } else if (packet.type === "serial_fault") {
+          const message = packet.message ?? "USB-UART connection lost";
+          state.addLog("ERROR", message);
+          this.disconnect(message);
         } else if (packet.type === "error") {
           state.addLog("ERROR", packet.message ?? "Serial bridge error");
-          // The backend closes the socket if opening the port fails.
+          // Preserve the original opening error instead of a generic close.
+          if (this.connecting) this.disconnect(packet.message ?? "Unable to open UART");
         } else {
           state.addLog(
             packet.type === "rx" ? "RX" : "INFO",
@@ -159,31 +203,37 @@ class FpgaSerialService {
       }
     };
     ws.onerror = () => {
-      if (this.socket === ws)
+      if (this.socket === ws) {
         useRuntime.getState().addLog("ERROR", "Serial WebSocket error");
+        this.disconnect("Serial WebSocket error");
+      }
     };
     ws.onclose = () => {
       if (this.socket !== ws) return;
       this.socket = null;
       this.connecting = false;
+      this.finishConnection("Serial connection closed");
       this.failThreshold("Serial connection closed");
       this.failRun("Serial connection closed");
+      this.failStop("Serial connection closed before run cleanup was confirmed");
       const state = useRuntime.getState();
-      state.setSerial(false, "Disconnected");
+      state.setSerial(false, "Serial connection closed");
       state.addLog("INFO", "Serial socket closed");
     };
   }
 
-  disconnect(): void {
+  disconnect(reason = "Disconnected"): void {
     const ws = this.socket;
+    this.finishConnection(reason);
     if (!ws) return;
     this.socket = null;
     this.connecting = false;
     this.failThreshold("Serial connection disconnected");
     this.failRun("Serial connection disconnected");
-    ws.close();
+    this.failStop("Serial connection disconnected");
+    try { ws.close(); } catch { /* local state is invalidated even if close fails */ }
     const state = useRuntime.getState();
-    state.setSerial(false, "Disconnected");
+    state.setSerial(false, reason);
     state.addLog("INFO", "Serial socket disconnected");
   }
 
@@ -217,6 +267,29 @@ class FpgaSerialService {
         this.socket!.send(JSON.stringify({ type: "set_run_state", active: true, gpio_debug: gpioDebug }));
       } catch (error) {
         this.failRun(error instanceof Error ? error.message : "WebSocket send failed");
+      }
+    });
+  }
+
+  private failStop(message: string): void {
+    const pending = this.pendingStop;
+    if (!pending) return;
+    this.pendingStop = null;
+    clearTimeout(pending.timer);
+    pending.reject(new Error(message));
+  }
+
+  /** A stopped response acknowledges recording cleanup, even if AD3 stop failed.
+   * Wait for the actual response, not a local runActive=false snapshot. */
+  stopRun(): Promise<string[]> {
+    if (this.pendingStop) return Promise.reject(new Error("Run cleanup already pending"));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => this.failStop("Serial bridge did not confirm run cleanup"), 15000);
+      this.pendingStop = { resolve, reject, timer };
+      try {
+        if (!this.setRunActive(false)) this.failStop("Could not send Stop to the serial bridge");
+      } catch (error) {
+        this.failStop(error instanceof Error ? error.message : String(error));
       }
     });
   }

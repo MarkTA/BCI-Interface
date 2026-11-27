@@ -73,7 +73,7 @@ export type ComparatorStart = ComparatorPreview & {
   sample_rate_hz: number;
   channels: Record<string, number>;
 };
-export type DigitalStatus = { active: boolean; mode: string; outputs_low?: boolean };
+export type DigitalStatus = { active: boolean; mode: string; outputs_low?: boolean; error?: string };
 export type PulseScope = {
   time_us: number[]; voltage_v: number[]; min_v: number;
   max_v: number; pulse_width_us: number | null; edge_count: number; note: string;
@@ -119,8 +119,8 @@ export const api = {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req),
     }),
-  digitalStatus: () => request<DigitalStatus>("/api/ad3/digital/status"),
-  digitalStop: () => request<DigitalStatus>("/api/ad3/digital/stop", { method: "POST" }),
+  digitalStatus: () => request<DigitalStatus>("/api/ad3/digital/status", { signal: AbortSignal.timeout(3000) }),
+  digitalStop: () => request<DigitalStatus>("/api/ad3/digital/stop", { method: "POST", signal: AbortSignal.timeout(5000) }),
   digitalScope: () => request<PulseScope>("/api/ad3/digital/scope", { method: "POST" }),
   ports: () => request<{ device: string; description: string }[]>("/api/ports"),
   health: () => request<{ ok: boolean; service: string }>("/api/health"),
@@ -167,5 +167,5 @@ export const api = {
       status: "ready" | "warning" | "unavailable";
       message: string;
       warning: string | null;
-    }>("/api/ad3/connection"),
+    }>("/api/ad3/connection", { signal: AbortSignal.timeout(8000) }),
 };
